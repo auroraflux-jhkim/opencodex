@@ -202,6 +202,11 @@ describe("start and ensure journal ownership (#1230)", () => {
             events.push("probe:" + (++probes) + ":" + leased);
             return probes === 1 ? null : live;
           },
+          observeProxyLiveness: async budget => {
+            if (budget !== START_OWNERSHIP_LIVENESS) throw new Error("changed liveness budget");
+            events.push("probe:" + (++probes) + ":" + leased);
+            return { kind: "live", live };
+          },
           readPidFileValue: () => existsSync(${JSON.stringify(fx.pidPath)}) ? Number(readFileSync(${JSON.stringify(fx.pidPath)}, "utf8")) : null,
           readRuntimePort: () => ({ pid: 4242, port: 10100 }),
           removePidIfValueIs: pid => { events.push("pid-remove"); if (pid === 4242) unlinkSync(${JSON.stringify(fx.pidPath)}); },

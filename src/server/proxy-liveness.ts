@@ -393,6 +393,17 @@ export async function proxyIdentityAt(
   opts: { hostname?: string; expectedPid?: number } = {},
   io: LivenessIo = {},
 ): Promise<{ pid: number | null; version?: string; role?: string; packageTreeFenced?: true } | null> {
+  return proxyIdentityAtObserved(port, opts, io);
+}
+
+/** Preserve negative evidence for recovery without changing identity-only callers. */
+async function proxyIdentityAtObserved(
+  port: number,
+  opts: { hostname?: string; expectedPid?: number },
+  io: LivenessIo,
+  observe?: (result: EndpointLiveness) => void,
+): ReturnType<typeof proxyIdentityAt> {
+  const negative = (result: "dead" | "unknown"): null => { observe?.(result); return null; };
   const fetchFn = io.fetchFn ?? directLocalHttpFetch;
   const sleepFn = io.sleepFn ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   const nowFn = io.nowFn ?? Date.now;
@@ -401,10 +412,11 @@ export async function proxyIdentityAt(
   const attempts = Number.isNaN(requestedAttempts)
     ? 1
     : Math.max(1, Math.min(requestedAttempts, 5));
+  let sawUnknown = false;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const remainingMs = io.deadlineAt === undefined ? baseTimeoutMs : io.deadlineAt - nowFn();
-    if (remainingMs <= 0) return null;
+    if (remainingMs <= 0) return negative("unknown");
     const timeoutMs = Math.min(baseTimeoutMs, remainingMs);
     try {
       const url = `http://${probeHostname(opts.hostname)}:${port}/healthz`;
@@ -413,12 +425,12 @@ export async function proxyIdentityAt(
       });
       if (!res.ok && io.acceptPackageTreeFenced && res.status === 503) {
         const fenced = (await res.json().catch(() => null)) as HealthzIdentity | null;
-        if (!isPackageTreeFencedHealthz(fenced)) return null;
+        if (!isPackageTreeFencedHealthz(fenced)) return negative("unknown");
         const fencedPid = fenced!.pid as number;
-        if (opts.expectedPid !== undefined && fencedPid !== opts.expectedPid) return null;
+        if (opts.expectedPid !== undefined && fencedPid !== opts.expectedPid) return negative("unknown");
         const attestMs = io.deadlineAt === undefined ? baseTimeoutMs : Math.min(baseTimeoutMs, io.deadlineAt - nowFn());
-        if (attestMs <= 0) return null;
-        if ((await attestFencedIdentity(url, port, fencedPid, io, fetchFn, attestMs)) !== "proven") return null;
+        if (attestMs <= 0) return negative("unknown");
+        if ((await attestFencedIdentity(url, port, fencedPid, io, fetchFn, attestMs)) !== "proven") return negative("unknown");
         const fencedVersion = isHealthzVersion(fenced?.version) ? fenced!.version as string : undefined;
         return {
           pid: fencedPid,
@@ -426,11 +438,11 @@ export async function proxyIdentityAt(
           packageTreeFenced: true,
         };
       }
-      if (!res.ok) return null;
-      const body = (await res.json().catch(() => null)) as HealthzIdentity | null;
-      if (!isOpencodexHealthz(body)) return null;
+      if (!res.ok) return negative("unknown");
+      const body = (await res.json().catch(() => undefined)) as HealthzIdentity | null | undefined;
+      if (!isOpencodexHealthz(body ?? null)) return negative(res.status === 200 && body !== undefined ? "dead" : "unknown");
       const pid = typeof body?.pid === "number" ? body.pid : null;
-      if (opts.expectedPid !== undefined && pid !== null && pid !== opts.expectedPid) return null;
+      if (opts.expectedPid !== undefined && pid !== null && pid !== opts.expectedPid) return negative("unknown");
       // Whoever holds the port controls this response. Only carry bounded semver text into
       // diagnostics; dropping anything else prevents terminal controls reaching human output.
       const version = isHealthzVersion(body?.version) ? body.version : undefined;
@@ -442,15 +454,31 @@ export async function proxyIdentityAt(
         ...(version === undefined ? {} : { version }),
         ...(role === undefined ? {} : { role }),
       };
-    } catch {
+    } catch (error) {
       // Transport failure (timeout / refused) — retry while budget remains; a proxy that
       // has only just begun listening can miss a single short probe (#764).
-      if (attempt >= attempts) return null;
-      if (io.deadlineAt !== undefined && io.deadlineAt - nowFn() <= 0) return null;
+      if (!isConnectionRefused(error)) sawUnknown = true;
+      if (attempt >= attempts) return negative(sawUnknown ? "unknown" : "dead");
+      if (io.deadlineAt !== undefined && io.deadlineAt - nowFn() <= 0) return negative("unknown");
       await sleepFn(100);
     }
   }
-  return null;
+  return negative("unknown");
+}
+
+export type ProxyLivenessObservation =
+  | { kind: "live"; live: LiveProxy }
+  | { kind: "absent" | "unknown"; live: null };
+
+/** Same candidates and budgets as findLiveProxy; only definitive negatives permit recovery. */
+export async function observeProxyLiveness(io: LivenessIo = {}): Promise<ProxyLivenessObservation> {
+  let alivePid = false, unknown = false;
+  const live = await discoverLiveProxy(io, {
+    pid: pid => { alivePid = pid !== null; },
+    endpoint: result => { if (result === "unknown") unknown = true; },
+  });
+  if (live) return { kind: "live", live };
+  return { kind: alivePid || unknown ? "unknown" : "absent", live: null };
 }
 
 /**
@@ -459,6 +487,13 @@ export async function proxyIdentityAt(
  * found and a foreign listener on the configured port is rejected.
  */
 export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | null> {
+  return discoverLiveProxy(io);
+}
+
+async function discoverLiveProxy(io: LivenessIo, observer?: {
+  pid: (pid: number | null) => void;
+  endpoint: (result: EndpointLiveness) => void;
+}): Promise<LiveProxy | null> {
   // Prefer the cheap alive-pid check: the Windows cmdline probe (WMIC/PowerShell) is too
   // expensive for waitForProxy's 150ms poll loop, and /healthz identity is the real trust gate.
   const readPidFn = io.readPidFn ?? readAlivePid;
@@ -470,6 +505,9 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
   const probeIo: LivenessIo = io;
   const budgetExhausted = (): boolean =>
     deadlineAt !== undefined && nowFn() >= deadlineAt;
+  const expired = (): null => { observer?.endpoint("unknown"); return null; };
+  const probe = (port: number, opts: { hostname?: string; expectedPid?: number }) =>
+    proxyIdentityAtObserved(port, opts, probeIo, observer?.endpoint);
 
   // The cheap pid is discovery-only. Before it can appear in a returned (killable) result
   // it must pass the full identity check AND the verifier must echo the exact candidate —
@@ -488,13 +526,14 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
   };
 
   const pid = readPidFn();
+  observer?.pid(pid);
   let probedPort: number | null = null;
   if (pid) {
     const runtime = readRuntimeFn(pid);
     if (runtime?.port) {
-      if (budgetExhausted()) return null;
+      if (budgetExhausted()) return expired();
       probedPort = runtime.port;
-      const identity = await proxyIdentityAt(runtime.port, { hostname: runtime.hostname, expectedPid: pid }, probeIo);
+      const identity = await probe(runtime.port, { hostname: runtime.hostname, expectedPid: pid });
       if (identity) {
         // healthz confirmed the pid itself → trusted; a pidless legacy body did not,
         // so the cheap pid must pass full identity verification before it is returned.
@@ -517,9 +556,9 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
   // identity-probe it so ensure/update/stop see the live proxy instead of shadowing it.
   const record = readRuntimeFn();
   if (record?.port && record.port !== probedPort) {
-    if (budgetExhausted()) return null;
+    if (budgetExhausted()) return expired();
     const expectedPid = typeof record.pid === "number" ? record.pid : undefined;
-    const identity = await proxyIdentityAt(record.port, { hostname: record.hostname, expectedPid }, probeIo);
+    const identity = await probe(record.port, { hostname: record.hostname, expectedPid });
     // Only the healthz-reported pid is authoritative here. The record's pid may be stale
     // (its process dead, the port reused by a pidless legacy proxy) — synthesizing it
     // would hand destructive callers (stopProxy → kill fallback) a reusable pid.
@@ -538,8 +577,10 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
 
   const config = configFn();
   const port = config.port ?? 10100;
-  if (budgetExhausted()) return null;
-  const identity = await proxyIdentityAt(port, { hostname: config.hostname }, probeIo);
+  if (budgetExhausted()) return expired();
+  // Port zero requests an OS-assigned port; it cannot name an existing listener.
+  if (observer && port === 0) return null;
+  const identity = await probe(port, { hostname: config.hostname });
   if (identity) {
     return {
       pid: verifiedReportedPid(identity.pid) ?? killablePid(pid),

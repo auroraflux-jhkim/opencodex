@@ -1,0 +1,4 @@
+{
+  "cli-start-owner-absence.test.ts": "cli",
+  "proxy-liveness-recovery.test.ts": "server"
+}
