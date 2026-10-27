@@ -141,3 +141,21 @@ export function verifyWindowsPrivateEntries(entries: readonly WindowsPrivateEntr
     return result.success && !result.timedOut && windowsPrivateEntriesAclMatches(result.stdout, entries);
   } catch { return false; }
 }
+
+/** Async counterpart for hardening paths that must yield during descriptor inspection. */
+export async function verifyWindowsPrivateEntriesAsync(entries: readonly WindowsPrivateEntry[], timeoutMs: number): Promise<boolean> {
+  if (entries.length === 0 || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return false;
+  try {
+    const env: Record<string, string | undefined> = { ...process.env, OCX_ACL_COUNT: String(entries.length) };
+    for (let i = 0; i < entries.length; i++) env[`OCX_ACL_PATH_${i}`] = entries[i]!.path;
+    const child = Bun.spawn([
+      resolveTrustedWindowsPowerShellExe(), "-NoLogo", "-NoProfile", "-NonInteractive",
+      "-ExecutionPolicy", "Bypass", "-EncodedCommand", ENCODED_ACL_SCRIPT,
+    ], {
+      env, stdin: "ignore", stdout: "pipe", stderr: "ignore", windowsHide: true,
+      timeout: Math.max(1, Math.min(WINDOWS_OWNER_ACL_TIMEOUT_MS, Math.floor(timeoutMs))),
+    });
+    const [exitCode, bytes] = await Promise.all([child.exited, new Response(child.stdout).arrayBuffer()]);
+    return exitCode === 0 && windowsPrivateEntriesAclMatches(new Uint8Array(bytes), entries);
+  } catch { return false; }
+}

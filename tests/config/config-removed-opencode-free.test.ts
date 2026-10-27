@@ -13,6 +13,8 @@ import { repoPath } from "../helpers/repo-root";
 import { runPassiveRead } from "../../src/lib/passive-read";
 import { atomicWriteFileNoFollow } from "../../src/config/atomic-write";
 import { join } from "node:path";
+import { hardenSecretPath, hardenSecretPathAsync, resetHardenedStateForTests, setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests, verifySecretPathAcl } from "../../src/lib/windows-secret-acl";
+import { verifyWindowsPrivateEntriesAsync } from "../../src/lib/windows-owner-acl";
 
 test("retired OpenCode Free entries warn once on load and an unrelated save persists their removal", () => {
   const home = createTempHome("ocx-removed-provider-");
@@ -208,6 +210,57 @@ test("an identical original recovery copy is reused without another sibling", ()
   });
 });
 
+test.skipIf(process.platform !== "win32")("explicit SYSTEM and Administrators grants survive hardening and permit recovery reuse", async () => {
+  const home = createTempHome("ocx-recovery-privileged-");
+  const previousVerify = process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const bytes = JSON.stringify({ ...getDefaultConfig(), providers: { "opencode-free": {} } });
+    writeFileSync(getConfigPath(), bytes);
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    atomicWriteFileNoFollow(backup, bytes, undefined, {}, { exclusive: true });
+    const icacls = join(process.env.SystemRoot!, "System32", "icacls.exe");
+    expect(Bun.spawnSync([icacls, backup, "/grant:r", "*S-1-5-18:(F)", "*S-1-5-32-544:(F)"]).exitCode).toBe(0);
+    resetHardenedStateForTests();
+    expect(hardenSecretPath(backup, { required: true }).ok).toBe(true);
+    const before = Bun.spawnSync([icacls, backup]).stdout.toString();
+    expect(verifySecretPathAcl(backup)).toBe(true);
+    process.env.OPENCODEX_ACL_VERIFY_EXISTING = "1";
+    const calls: string[][] = [];
+    const probe = (args: string[]) => {
+      calls.push(args);
+      return { success: true, exitCode: 0, timedOut: false, stdout: before };
+    };
+    setIcaclsRunnerForTests(probe);
+    setAsyncIcaclsRunnerForTests(async args => probe(args));
+    resetHardenedStateForTests();
+    expect(hardenSecretPath(backup, { required: true }).ok).toBe(true);
+    resetHardenedStateForTests();
+    expect((await hardenSecretPathAsync(backup, { required: true })).ok).toBe(true);
+    expect(calls).toEqual([[backup], [backup]]);
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    expect(Bun.spawnSync([icacls, backup]).stdout.toString()).toBe(before);
+    loadConfig();
+    readConfigDiagnostics();
+    expect(readdirSync(home.root).filter(name => name.endsWith(".bak"))).toHaveLength(1);
+    expect(Bun.spawnSync([icacls, backup]).stdout.toString()).toBe(before);
+    for (const sid of ["S-1-1-0", "S-1-5-32-545"]) {
+      expect(Bun.spawnSync([icacls, backup, "/grant:r", `*${sid}:(R)`]).exitCode).toBe(0);
+      expect(verifySecretPathAcl(backup)).toBe(false);
+      expect(await verifyWindowsPrivateEntriesAsync([{ path: backup, directory: false }], 5_000)).toBe(false);
+      expect(Bun.spawnSync([icacls, backup, "/remove:g", `*${sid}`]).exitCode).toBe(0);
+    }
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousVerify === undefined) delete process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+    else process.env.OPENCODEX_ACL_VERIFY_EXISTING = previousVerify;
+    resetHardenedStateForTests();
+    warn.mockRestore(); home.remove();
+  }
+});
+
 function recoveryProtection(path: string): string | number {
   if (process.platform !== "win32") {
     const entry = statSync(path);
@@ -217,11 +270,8 @@ function recoveryProtection(path: string): string | number {
   }
   const acl = Bun.spawnSync([join(process.env.SystemRoot!, "System32", "icacls.exe"), path]);
   expect(acl.exitCode).toBe(0);
-  const lines = acl.stdout.toString().replaceAll("\r", "").split("\n");
-  const aces = [lines[0]!.slice(path.length).trim(), ...lines.slice(1).filter(line => /^\s+\S/.test(line)).map(line => line.trim())];
-  expect(aces).toHaveLength(1);
-  expect(aces[0]).toMatch(/:\(F\)$/);
-  return aces[0]!;
+  expect(verifySecretPathAcl(path)).toBe(true);
+  return acl.stdout.toString();
 }
 
 test("an identical recovery with broad permissions is preserved and gets a protected sibling", () => {
@@ -232,6 +282,7 @@ test("an identical recovery with broad permissions is preserved and gets a prote
     const icacls = join(process.env.SystemRoot ?? "", "System32", "icacls.exe");
     if (process.platform === "win32") {
       expect(Bun.spawnSync([icacls, backup, "/grant", "*S-1-1-0:(R)"]).exitCode).toBe(0);
+      expect(verifySecretPathAcl(backup)).toBe(false);
       priorAcl = Bun.spawnSync([icacls, backup]).stdout.toString();
     } else chmodSync(backup, 0o644);
     loadConfig();
@@ -254,9 +305,11 @@ test.each(["compliant", "broad", "unverifiable"])("recovery reuse checks the exi
     atomicWriteFileNoFollow(backup, "original", undefined, {}, { exclusive: true });
     const module = (path: string) => pathToFileURL(repoPath(path)).href;
     const script = `import { setPlatformForTests, setIcaclsRunnerForTests } from ${JSON.stringify(module("src/lib/windows-secret-acl.ts"))};
+      import { setWindowsOwnerAclRunnerForTests } from ${JSON.stringify(module("src/lib/windows-owner-acl.ts"))};
       import { setWindowsPrincipalRunnerForTests } from ${JSON.stringify(module("src/lib/windows-user-principal.ts"))};
       import { preserveRemovedOpenCodeFree } from ${JSON.stringify(module("src/config/removed-opencode-free-backup.ts"))};
       setPlatformForTests('win32');
+      setWindowsOwnerAclRunnerForTests(() => ({ success: false, timedOut: false, stdout: '' }));
       setWindowsPrincipalRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: 'S-1-5-21-9-9-9-1001\\r\\nTESTHOST\\\\tester' }));
       const commands = [];
       setIcaclsRunnerForTests(args => {
