@@ -21,7 +21,8 @@ function holdsOriginal(path: string, original: Uint8Array, retries = 3): boolean
     if (!bytes.equals(Buffer.from(original))) return false;
     if (opened.nlink > 1n) {
       // Exclusive publication briefly links its private temp to the final name.
-      // A persistent hard link remains ineligible; do not spin or certify it.
+      // Recheck briefly to reuse a prompt publisher's copy; a delayed publisher
+      // may leave multiple exact, protected copies. Never certify a linked file.
       if (retries === 0) return false;
       closeSync(descriptor);
       descriptor = undefined;

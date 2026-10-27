@@ -299,7 +299,7 @@ test("a recovery that remains multiply linked is never certified", () => {
   });
 });
 
-test("overlapping process loads reuse a recovery after publication unlinks its temp", async () => {
+test.each([5, 500])("overlapping loads preserve protected originals with a %i ms publisher delay", async delay => {
   const home = createTempHome("ocx-recovery-overlap-");
   const ready = home.path("publisher-ready");
   const release = home.path("publisher-release");
@@ -318,8 +318,10 @@ test("overlapping process loads reuse a recovery after publication unlinks its t
           if (Date.now() >= until) throw new Error('publisher release timed out');
           Bun.sleepSync(5);
         }
+        Bun.sleepSync(${delay});
       }
-    }})); const { loadConfig } = await import(${JSON.stringify(module)}); loadConfig();`;
+    }})); const { loadConfig } = await import(${JSON.stringify(module)});
+    if (loadConfig().providers['opencode-free']) throw new Error('retired provider retained');`;
   const first = Bun.spawn([process.execPath, "--eval", firstScript], { env: { ...process.env }, stdout: "ignore", stderr: "pipe" });
   let second: ReturnType<typeof Bun.spawn> | undefined;
   try {
@@ -327,26 +329,38 @@ test("overlapping process loads reuse a recovery after publication unlinks its t
     while (!existsSync(ready) && Date.now() < until) await Bun.sleep(5);
     expect(existsSync(ready)).toBe(true);
     expect(statSync(backup).nlink).toBe(2);
-    // Only control the scheduler: the publisher performs its own real unlink.
-    const secondScript = `import * as fs from 'node:fs'; const sleep = Bun.sleepSync;
+    // Start the finite publisher delay at the first recheck. Keep real bounded
+    // sleeps: waiting for unlink here would hide exhaustion of the retry budget.
+    const secondScript = `import * as fs from 'node:fs'; const sleep = Bun.sleepSync; let retries = 0;
       Bun.sleepSync = ms => {
-        fs.writeFileSync(${JSON.stringify(release)}, 'release');
-        const until = Date.now() + 10000;
-        while (fs.statSync(${JSON.stringify(backup)}).nlink !== 1) {
-          if (Date.now() >= until) throw new Error('publisher unlink timed out');
-          sleep(5);
-        }
+        if (ms !== 10 || ++retries > 9) throw new Error('unbounded recovery recheck');
+        if (retries === 1) fs.writeFileSync(${JSON.stringify(release)}, 'release');
         sleep(ms);
-      }; const { loadConfig } = await import(${JSON.stringify(module)}); loadConfig();`;
+      }; const { loadConfig } = await import(${JSON.stringify(module)});
+      if (loadConfig().providers['opencode-free']) throw new Error('retired provider retained');
+      if (retries === 0 || (${delay} === 500 && retries !== 9)) throw new Error('overlap schedule missed');`;
     second = Bun.spawn([process.execPath, "--eval", secondScript], { env: { ...process.env }, stdout: "ignore", stderr: "pipe" });
     expect(await second.exited).toBe(0);
     writeFileSync(release, "release");
     expect(await first.exited).toBe(0);
-    expect(readdirSync(home.root).filter(name => name.endsWith(".bak"))).toEqual(["config.json.pre-opencode-free-removal.bak"]);
+    const copies = readdirSync(home.root).filter(name => /^config\.json\.pre-opencode-free-removal(?:\..+)?\.bak$/.test(name));
+    expect(copies).toHaveLength(delay === 5 ? 1 : 2);
     expect(readdirSync(home.root).filter(name => name.endsWith(".tmp"))).toEqual([]);
-    expect(readFileSync(backup)).toEqual(bytes);
-    expect(statSync(backup).nlink).toBe(1);
-    recoveryProtection(backup);
+    for (const name of copies) {
+      const path = home.path(name);
+      expect(readFileSync(path)).toEqual(bytes);
+      expect(statSync(path).nlink).toBe(1);
+      recoveryProtection(path);
+    }
+    for (const child of [first, second]) {
+      const output = await new Response(child.stderr).text();
+      const notices = output.split("\n").filter(line => line.includes("the original file was saved to"));
+      expect(notices).toHaveLength(1);
+      const name = notices[0]!.match(/config\.json\.pre-opencode-free-removal(?:\.[\w-]+)?\.bak/)?.[0];
+      expect(name).toBeDefined();
+      expect(copies).toContain(name!);
+      expect(existsSync(home.path(name!))).toBe(true);
+    }
   } finally {
     writeFileSync(release, "release");
     await first.exited;
