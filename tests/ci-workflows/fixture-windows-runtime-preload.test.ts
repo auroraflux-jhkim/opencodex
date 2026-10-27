@@ -1,19 +1,23 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { helperPath, repoPath } from "../helpers/repo-root";
+import { createFixtureNamespaceOwner, FIXTURE_NAMESPACE_MARKER } from "../helpers/fixture-namespace-owner";
 
 let root: string;
 let ownedTemp: string;
 let realHome: string;
+let owner: ReturnType<typeof createFixtureNamespaceOwner>;
 const extraRoots: string[] = [];
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "ocx-preload-admission-"));
   ownedTemp = join(root, "temp");
-  realHome = join(ownedTemp, "real-user");
+  realHome = join(root, "real-user");
+  mkdirSync(ownedTemp);
+  owner = createFixtureNamespaceOwner(ownedTemp);
   mkdirSync(realHome, { recursive: true });
 });
 
@@ -24,7 +28,7 @@ afterEach(() => {
   }
 });
 
-function load(fixtureHome: string | undefined, guard = "1") {
+function load(fixtureHome: string | undefined, guard = "1", overrides: NodeJS.ProcessEnv = {}) {
   const env = {
     ...process.env,
     TEMP: ownedTemp, TMP: ownedTemp, TMPDIR: ownedTemp,
@@ -33,18 +37,20 @@ function load(fixtureHome: string | undefined, guard = "1") {
     OCX_REAL_CLAUDE_CONFIG_DIR: join(realHome, ".claude"),
     CLAUDE_CONFIG_DIR: join(realHome, ".claude"),
     OPENCODEX_HOME: fixtureHome,
+    ...owner,
     OCX_FIXTURE_KNOWN_FOLDER: repoPath("src", "codex", "windows-local-appdata.ts"),
+    ...overrides,
   };
   return spawnSync(process.execPath, ["--preload", helperPath("fixture-windows-runtime-preload.ts"), "-e",
     'console.log("FIXTURE_ADMITTED=" + require(process.env.OCX_FIXTURE_KNOWN_FOLDER).resolveWindowsLocalAppData())',
   ], { cwd: root, env, encoding: "utf8", timeout: 10_000 });
 }
 
-function refuses(fixtureHome: string, guard = "1") {
+function refuses(fixtureHome: string, guard = "1", overrides: NodeJS.ProcessEnv = {}) {
   const target = join(dirname(fixtureHome), "local-appdata");
   const homeExisted = existsSync(fixtureHome);
   expect(existsSync(target)).toBe(false);
-  const result = load(fixtureHome, guard);
+  const result = load(fixtureHome, guard, overrides);
   expect(result.error).toBeUndefined();
   expect({ status: result.status, stderr: result.stderr }).not.toMatchObject({ status: 0 });
   expect(result.stderr).toMatch(/refus|requires/i);
@@ -104,7 +110,7 @@ test("accepts the checkout .tmp fixture root used by Windows catalog tests", () 
   mkdirSync(repoPath(".tmp"), { recursive: true });
   const fixture = mkdtempSync(repoPath(".tmp", "preload-admission-"));
   extraRoots.push(fixture);
-  const result = load(join(fixture, "ocx"));
+  const result = load(join(fixture, "ocx"), "1", createFixtureNamespaceOwner(fixture));
   expect({ status: result.status, stderr: result.stderr }).toMatchObject({ status: 0 });
   expect(existsSync(join(fixture, "local-appdata"))).toBe(true);
 });
@@ -129,4 +135,53 @@ test("refuses a protected local-appdata target even when the fixture home is own
   expect(result.stderr).toMatch(/refus/i);
   expect(result.stdout).not.toContain("FIXTURE_ADMITTED=");
   expect(readdirSync(protectedTarget)).toEqual([]);
+});
+
+test("refuses a missing owner marker before mkdir or mock registration", () => {
+  unlinkSync(join(ownedTemp, FIXTURE_NAMESPACE_MARKER));
+  refuses(join(ownedTemp, "fixture", "ocx"));
+});
+
+test.each(["wrong-nonce", ""])("refuses a mismatched or empty owner nonce: %s", nonce => {
+  refuses(join(ownedTemp, "fixture", "ocx"), "1", { OCX_FIXTURE_NAMESPACE_NONCE: nonce });
+});
+
+test.each([undefined, "relative-root"])("requires an absolute owner root: %s", fixtureRoot => {
+  refuses(join(ownedTemp, "fixture", "ocx"), "1", { OCX_FIXTURE_NAMESPACE_ROOT: fixtureRoot });
+});
+
+test.each([false, true])("refuses a protected tmpdir's ..fixture child (home exists: %s)", exists => {
+  const protectedTemp = join(realHome, ".opencodex");
+  const fixture = join(protectedTemp, "..fixture");
+  mkdirSync(fixture, { recursive: true });
+  const home = join(fixture, "ocx");
+  if (exists) mkdirSync(home);
+  refuses(home, "1", {
+    ...createFixtureNamespaceOwner(fixture),
+    TEMP: protectedTemp, TMP: protectedTemp, TMPDIR: protectedTemp,
+  });
+});
+
+test.skipIf(process.platform !== "win32" && process.platform !== "darwin")
+  .each([".OPENCODEX", ".CODEX", ".CLAUDE", "Library/LAUNCHAGENTS"])
+  ("refuses a missing case-equivalent protected tree: %s", tree => {
+    realHome = join(ownedTemp, "case-user");
+    mkdirSync(realHome);
+    const home = join(realHome, tree);
+    expect(existsSync(home)).toBe(false);
+    refuses(home, "1", createFixtureNamespaceOwner(realHome));
+  });
+
+test("refuses an owner root containing a protected tree even when home and target are outside it", () => {
+  realHome = join(ownedTemp, "real-user");
+  mkdirSync(realHome);
+  refuses(join(ownedTemp, "safe", "ocx"));
+});
+
+test("accepts an ordinary ..fixture component within its owned root", () => {
+  const home = join(ownedTemp, "..fixture", "ocx");
+  const result = load(home);
+  expect({ status: result.status, stderr: result.stderr }).toMatchObject({ status: 0 });
+  expect(result.stdout).toContain(`FIXTURE_ADMITTED=${join(ownedTemp, "..fixture", "local-appdata")}`);
+  expect(existsSync(join(dirname(home), "local-appdata"))).toBe(true);
 });

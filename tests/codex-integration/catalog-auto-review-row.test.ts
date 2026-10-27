@@ -19,6 +19,7 @@ import { RESERVE_METADATA_SOURCE_FIELD } from "../../src/codex/catalog/reserve";
 import { CODEX_NATIVE_ALIAS_CATALOG_KIND } from "../../src/codex/catalog/kinds";
 import snapshot from "../../src/codex/data/upstream-models.json";
 import { helperPath, repoPath, repoRoot } from "../helpers/repo-root";
+import { createFixtureNamespaceOwner } from "../helpers/fixture-namespace-owner";
 import { CODEX_INTERNAL_OPENAI_MODELS } from "../../src/codex/control-plane-models";
 import { NoEnabledOpenAiProviderError, routeModel } from "../../src/router";
 import type { OcxConfig } from "../../src/types";
@@ -229,6 +230,7 @@ for (const writer of ["retained-sync", "convergence"] as const) {
       const base = process.platform === "win32" ? repoPath(".tmp") : tmpdir();
       mkdirSync(base, { recursive: true });
       const root = mkdtempSync(join(base, "ar-"));
+      const namespaceOwner = createFixtureNamespaceOwner(root);
       const codexHome = join(root, "codex");
       const ocxHome = join(root, "ocx");
       mkdirSync(codexHome); mkdirSync(ocxHome);
@@ -287,7 +289,7 @@ for (const writer of ["retained-sync", "convergence"] as const) {
         const result = spawnSync(process.execPath, ["--preload", helperPath("fixture-windows-runtime-preload.ts"), "--eval", script], {
           // Windows children otherwise pay cold cache I/O for the entire server graph.
           cwd: repoRoot(), env: {
-            ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: ocxHome,
+            ...process.env, ...namespaceOwner, CODEX_HOME: codexHome, OPENCODEX_HOME: ocxHome,
             ...(process.platform === "win32" ? { BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" } : {}),
           },
           encoding: "utf8", maxBuffer: 8 * 1024 * 1024,
