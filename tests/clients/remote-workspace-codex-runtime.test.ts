@@ -4,6 +4,11 @@ import { copyFileSync, linkSync, mkdirSync, mkdtempSync, realpathSync, symlinkSy
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
+  codexCliUpdateSelectionGate,
+  beginCodexCliSelectionParentWrite,
+  createWorkerCommitWindow, createCodexCliUpdateFence,
+} from "../../src/codex/cli-update-selection-gate";
+import {
   CodexRemoteWorkspaceRuntimeFactory,
   RemoteWorkspaceCoordinator,
   type RemoteWorkspaceRuntimeFactory,
@@ -274,4 +279,157 @@ test.skipIf(process.platform === "win32")("a macOS bundle alias is replaced by t
   expect(spawns).toHaveLength(1);
   expect(spawns[0]!.argv[0]).toBe(canonicalBinary);
   expect(spawns[0]!.argv[0]).not.toBe(alias);
+});
+
+function launchGateStartOptions(emit: (type: RemoteWorkspaceSessionEvent["type"], text: string) => void = () => {}): Parameters<CodexRemoteWorkspaceRuntimeFactory["start"]>[0] {
+  return {
+    sessionId: "launch-gate-session",
+    deviceId: "launch-gate-device",
+    deviceName: "Fixture",
+    rootId: "launch-gate-root",
+    rootLabel: "Fixture",
+    capabilities: ["workspace.read"],
+    tools: ["list_directory", "read_file"],
+    coordinator: new RemoteWorkspaceCoordinator({
+      isOnline: () => true,
+      async invoke() { return { ok: true }; },
+    }),
+    emit,
+  };
+}
+
+test("Remote Workspace holds selection through async trust validation and releases on refusal or spawn failure", async () => {
+  const canonical = "/Applications/Codex.app/Contents/Resources/codex";
+  for (const outcome of ["untrusted", "spawn-failed", "started"] as const) {
+    const window = createWorkerCommitWindow({ gate: codexCliUpdateSelectionGate(), fence: createCodexCliUpdateFence() });
+    let checked!: () => void;
+    const checking = new Promise<void>(resolveCheck => { checked = resolveCheck; });
+    let finishCheck!: (reason: string | null) => void;
+    const trust = new Promise<string | null>(resolveTrust => { finishCheck = resolveTrust; });
+    const received: Record<string, unknown>[] = [];
+    const { spawns, spawn } = captureSpawns(received);
+    if (outcome === "spawn-failed") spawn.mockImplementation(() => { throw new Error("fixture spawn failure"); });
+    const factory = new CodexRemoteWorkspaceRuntimeFactory({
+      command: [process.execPath],
+      execDeps: {
+        platform: "darwin", exists: () => true, executable: () => true,
+        realpath: path => path === "/Applications/Codex.app" ? path : canonical,
+        macBundleTrustReasonAsync: async () => { checked(); return trust; },
+      },
+    });
+    let handle: Awaited<ReturnType<RemoteWorkspaceRuntimeFactory["start"]>> | undefined;
+    const starting = factory.start(launchGateStartOptions());
+    // Observe rejection immediately, including assertion-failure cleanup below.
+    const result = starting.then(value => ({ handle: value }), error => ({ error }));
+    try {
+      await Promise.race([checking, result.then(() => { throw new Error("start settled before trust validation"); })]);
+      expect(spawns).toHaveLength(0);
+      const entered = window.tryEnter();
+      if (entered) window.exit();
+      expect(entered).toBe(false);
+      finishCheck(outcome === "untrusted" ? "fixture untrusted bundle" : null);
+      const settled = await result;
+      if ("error" in settled) {
+        expect(String(settled.error)).toContain(outcome === "untrusted" ? "untrusted Codex exec target" : "fixture spawn failure");
+      } else {
+        handle = settled.handle;
+        expect(outcome).toBe("started");
+        expect(spawns[0]!.argv[0]).toBe(canonical);
+      }
+      expect(spawn).toHaveBeenCalledTimes(outcome === "untrusted" ? 0 : 1);
+      expect(window.tryEnter()).toBe(true);
+      window.exit();
+    } finally {
+      finishCheck(null);
+      const settled = await result;
+      if ("handle" in settled) handle = settled.handle;
+      try { await handle?.stop(); }
+      finally { window.exit(); spawn.mockRestore(); }
+    }
+  }
+});
+
+// Uses the REAL factory and its existing explicit command seam. A broken gate
+// reaches the spawn spy, which throws; it can never launch a real Codex app.
+test("CLI commit window blocks Remote Workspace native spawn and release restores the caller", async () => {
+  const factory = new CodexRemoteWorkspaceRuntimeFactory({
+    command: [process.execPath, repoPath("tests", "fake-codex-server.ts")],
+    env: { FAKE_CODEX_SCRIPT: JSON.stringify({ turns: [{}] }) },
+  });
+  const options = launchGateStartOptions();
+  const window = createWorkerCommitWindow({
+    gate: codexCliUpdateSelectionGate(),
+    fence: createCodexCliUpdateFence(),
+  });
+  let held = false;
+  const spawn = spyOn(Bun, "spawn").mockImplementation(() => {
+    throw new Error("unexpected native spawn while worker holds the gate");
+  });
+  try {
+    held = window.tryEnter();
+    expect(held).toBe(true);
+    await expect(factory.start(options)).rejects.toThrow("codex_cli_selection_busy");
+    expect(spawn).toHaveBeenCalledTimes(0);
+  } finally {
+    if (held) window.exit();
+    spawn.mockRestore();
+  }
+  // No native Codex fallback: command remains the repository's fake JSON-RPC server.
+  const handle = await factory.start(options);
+  try {
+    await handle.prompt("Complete this fixture turn");
+  } finally {
+    await handle.stop();
+  }
+  const parent = beginCodexCliSelectionParentWrite();
+  try { expect(parent.entered).toBe(true); }
+  finally { if (parent.entered) parent.exit(); }
+});
+
+// Unlike a gate-wrapper unit test, this reaches the existing prompt/interrupt/
+// close implementation. The emitted marker replaces a scheduling sleep.
+test("an existing Remote Workspace turn can interrupt and close while the worker gate is held", async () => {
+  let ready!: () => void;
+  const sawHeldTurn = new Promise<void>(resolveReady => { ready = resolveReady; });
+  const factory = new CodexRemoteWorkspaceRuntimeFactory({
+    command: [process.execPath, repoPath("tests", "fake-codex-server.ts")],
+    env: {
+      FAKE_CODEX_SCRIPT: JSON.stringify({
+        turns: [{
+          heldUntilInterrupt: true,
+          notifications: [{
+            method: "item/completed",
+            params: { item: { id: "gate-ready", type: "agentMessage", text: "gate-ready" } },
+          }],
+        }],
+      }),
+    },
+  });
+  const handle = await factory.start(launchGateStartOptions((type, text) => {
+    if (type === "assistant" && text === "gate-ready") ready();
+  }));
+  const window = createWorkerCommitWindow({
+    gate: codexCliUpdateSelectionGate(),
+    fence: createCodexCliUpdateFence(),
+  });
+  let held = false;
+  let stopped = false;
+  let turn: Promise<string> | undefined;
+  try {
+    turn = handle.prompt("Hold until interrupted").then(() => "resolved", () => "rejected");
+    await sawHeldTurn;
+    held = window.tryEnter();
+    expect(held).toBe(true);
+    await handle.stop();
+    stopped = true;
+    expect(await turn).toBe("rejected");
+    // The stop path must NOT steal/release the worker's ownership.
+    const parent = beginCodexCliSelectionParentWrite();
+    try { expect(parent.entered).toBe(false); }
+    finally { if (parent.entered) parent.exit(); }
+  } finally {
+    if (held) window.exit();
+    if (!stopped) await handle.stop();
+    if (turn) await turn;
+  }
 });

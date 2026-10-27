@@ -6,6 +6,10 @@ import {
   assertCodexExecTargetTrustedAsync,
   type CodexExecBoundaryAsyncDeps,
 } from "../codex/exec-boundary";
+import {
+  beginCodexCliSelectionParentWrite,
+  CodexCliSelectionMutationBusyError,
+} from "../codex/cli-update-selection-gate";
 import { remoteWorkspaceThreadStartParams } from "./workspace-coordinator";
 import { startRemoteWorkspaceToolBridge } from "./workspace-tool-bridge";
 import { truncateRemoteWorkspaceUtf8 } from "./workspace-utf8";
@@ -322,17 +326,6 @@ export class CodexRemoteWorkspaceRuntimeFactory implements RemoteWorkspaceRuntim
     const executablePath = isAbsolute(command[0]!) ? command[0]! : findExecutableOnPath(command[0]!);
     if (!executablePath) throw new Error("Codex CLI executable could not be resolved on this Hub");
     const platform = this.options.execDeps?.platform ?? process.platform;
-    // The checked canonical path is what the Hub execs, so a symlinked alias or a
-    // swapped bundle cannot route the app-server around the trust decision. On Windows
-    // the validated invocation for a .cmd/.bat target is the ComSpec wrapper: its file is
-    // the shell while the real command rides inside the /d /s /c args, so it cannot
-    // replace command[0] — the located executablePath stays and the launcher below
-    // rebuilds the escaped wrapper. On macOS the check returns the canonical binary.
-    const trustedTarget = await assertCodexExecTargetTrustedAsync(executablePath, {
-      env: process.env,
-      ...(this.options.execDeps ?? {}),
-    });
-    command[0] = platform === "win32" ? executablePath : trustedTarget;
     const runtimeDirectory = dirname(realpathSync(executablePath));
     const isolation = mkdtempSync(join(tmpdir(), "ocx-remote-codex-"));
     let processPath = process.env.PATH ?? "/usr/bin:/bin";
@@ -373,28 +366,61 @@ export class CodexRemoteWorkspaceRuntimeFactory implements RemoteWorkspaceRuntim
     const tokenEnvVar = "OCX_REMOTE_WORKSPACE_MCP_TOKEN";
     const mcpPrefix = `mcp_servers.${REMOTE_WORKSPACE_TOOL_NAMESPACE}`;
     const childEnv = { ...process.env, ...this.options.env, PATH: processPath, [tokenEnvVar]: bridge.token };
-    const invocation = remoteWorkspaceProcessInvocation([
-      ...command,
-      "-c", `${mcpPrefix}.url=${JSON.stringify(`${bridge.url}/mcp`)}`,
-      "-c", `${mcpPrefix}.bearer_token_env_var=${JSON.stringify(tokenEnvVar)}`,
-      "-c", `${mcpPrefix}.required=true`,
-      "-c", `${mcpPrefix}.enabled_tools=${JSON.stringify(options.tools)}`,
-      "-c", `${mcpPrefix}.default_tools_approval_mode="approve"`,
-      "app-server", "--listen", "stdio://",
-    ], { env: childEnv, platform });
     let child: Bun.Subprocess<"pipe", "pipe", "pipe">;
+    // A cli-update worker holds this gate from its final process scan through
+    // installer termination/readback; a new session must not appear inside that
+    // window. Busy is the same explicit pre-spawn failure path as a spawn
+    // throw, so the bridge and isolation are reclaimed identically.
+    const selectionWrite = beginCodexCliSelectionParentWrite();
+    if (!selectionWrite.entered) {
+      // Both teardown steps are attempted before the refusal leaves: the
+      // ordered runner keeps a rejected bridge stop from skipping isolation
+      // removal or replacing the explicit busy signal the caller maps to a
+      // retryable refusal. The raw cleanup error stays internal; the caller
+      // gets the same fixed busy evidence as every other pre-spawn refusal.
+      await runRemoteWorkspaceCleanupSteps([
+        () => bridge.stop(),
+        () => removeRemoteWorkspaceIsolation(isolation),
+      ]).catch(() => {});
+      throw new CodexCliSelectionMutationBusyError();
+    }
     try {
-      child = Bun.spawn([invocation.file, ...invocation.args], {
-        cwd: isolation,
-        env: childEnv,
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-        ...invocation.options,
-      });
+      try {
+        // Hold selection stable across async trust validation and spawn. A failed
+        // check releases admission too; no unchecked target reaches the launcher.
+        const trustedTarget = await assertCodexExecTargetTrustedAsync(executablePath, {
+          env: childEnv,
+          cwd: isolation,
+          ...(this.options.execDeps ?? {}),
+        });
+        // Windows returns ComSpec for .cmd/.bat; retain the located command so
+        // the launcher rebuilds its escaped wrapper. macOS executes the checked path.
+        command[0] = platform === "win32" ? executablePath : trustedTarget;
+        const invocation = remoteWorkspaceProcessInvocation([
+          ...command,
+          "-c", `${mcpPrefix}.url=${JSON.stringify(`${bridge.url}/mcp`)}`,
+          "-c", `${mcpPrefix}.bearer_token_env_var=${JSON.stringify(tokenEnvVar)}`,
+          "-c", `${mcpPrefix}.required=true`,
+          "-c", `${mcpPrefix}.enabled_tools=${JSON.stringify(options.tools)}`,
+          "-c", `${mcpPrefix}.default_tools_approval_mode="approve"`,
+          "app-server", "--listen", "stdio://",
+        ], { env: childEnv, platform });
+        child = Bun.spawn([invocation.file, ...invocation.args], {
+          cwd: isolation,
+          env: childEnv,
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+          ...invocation.options,
+        });
+      } finally {
+        selectionWrite.exit();
+      }
     } catch (error) {
-      await bridge.stop();
-      removeRemoteWorkspaceIsolation(isolation);
+      await runRemoteWorkspaceCleanupSteps([
+        () => bridge.stop(),
+        () => removeRemoteWorkspaceIsolation(isolation),
+      ]).catch(() => {});
       throw error;
     }
     const peer = new JsonLineRpcProcess(child);

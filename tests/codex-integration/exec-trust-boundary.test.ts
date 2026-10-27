@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -330,14 +330,25 @@ describe("exec boundary consumers", () => {
 
   test("a remote workspace refuses an untrusted Codex executable before any child starts", async () => {
     const h = harness(); h.addApp(); h.state.trustReason = "untrusted";
-    h.files.add("/fake/bin/codex"); h.runnable.add("/fake/bin/codex"); h.links.set("/fake/bin/codex", APP_BIN);
     const factory = new CodexRemoteWorkspaceRuntimeFactory({
-      command: ["/fake/bin/codex"],
-      execDeps: h.boundary,
+      // Workspace prepares its native helper/isolation before taking the launch
+      // gate. Use a real native binary there, then map its trust check to the app.
+      command: [process.execPath],
+      execDeps: {
+        ...h.boundary,
+        cwd: "/fixture", // Keep injected macOS PATH semantics independent of the host cwd.
+        executable: () => true,
+        realpath: path => path === BUNDLE ? BUNDLE : APP_BIN,
+      },
     });
-    await expect(factory.start({
-      sessionId: "s", deviceId: "d", deviceName: "d", rootId: "r", rootLabel: "r",
-      capabilities: [], tools: [], coordinator: {} as RemoteWorkspaceCoordinator, emit: () => {},
-    })).rejects.toThrow(CodexExecTrustError);
+    const spawn = spyOn(Bun, "spawn").mockImplementation(() => { throw new Error("unexpected untrusted spawn"); });
+    try {
+      await expect(factory.start({
+        sessionId: "s", deviceId: "d", deviceName: "d", rootId: "r", rootLabel: "r",
+        capabilities: ["workspace.read"], tools: ["read_file"], coordinator: {} as RemoteWorkspaceCoordinator, emit: () => {},
+      })).rejects.toThrow(CodexExecTrustError);
+      expect(h.asyncCalls).toEqual([[BUNDLE, APP_BIN]]);
+      expect(spawn).toHaveBeenCalledTimes(0);
+    } finally { spawn.mockRestore(); }
   });
 });
