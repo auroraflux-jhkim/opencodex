@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import {
@@ -59,8 +59,8 @@ function controlledTrust() {
   releaseOnCleanup.push(() => verification.resolve(null));
   const check: NonNullable<CodexExecBoundaryAsyncDeps["macBundleTrustReasonAsync"]> = async (root, binary, nextSignal) => {
     calls++;
-    expect(root).toBe(bundle);
-    expect(binary).toBe(process.execPath);
+    expect(root).toBe(canonicalFixtureBundle());
+    expect(binary).toBe(canonicalFixtureBinary());
     signal = nextSignal;
     entered.resolve();
     return verification.promise;
@@ -68,13 +68,23 @@ function controlledTrust() {
   return { entered, verification, check, get calls() { return calls; }, get signal() { return signal; } };
 }
 
+function canonicalFixtureBundle() { return join(directory, "Codex.app").replaceAll("\\", "/"); }
+function canonicalFixtureBinary() { return canonicalFixtureBundle() + "/Contents/MacOS/bun" + (process.platform === "win32" ? ".exe" : ""); }
+
 function installProbe(check: NonNullable<CodexExecBoundaryAsyncDeps["macBundleTrustReasonAsync"]>) {
+  // A real executable inside the canonical bundle keeps admission/lifecycle probes
+  // valid without letting an accepting injected verifier authorize an escaped target.
+  const binary = canonicalFixtureBinary();
+  if (!existsSync(binary)) {
+    mkdirSync(join(canonicalFixtureBundle(), "Contents", "MacOS"), { recursive: true });
+    copyFileSync(process.execPath, binary, constants.COPYFILE_FICLONE);
+  }
   setPromptTextProbeRuntimeForTests({ command: appBinary, source: "installed" });
   setPromptTextProbeCommandForTests({ binary: appBinary, args: ["-e", `process.stdout.write(${JSON.stringify(output)})`] });
   const deps: CodexExecBoundaryAsyncDeps = {
     platform: "darwin", env: { HOME: "/Users/boundary-fixture", PATH: "" },
     executable: candidate => candidate === appBinary,
-    realpath: candidate => candidate === appBinary ? process.execPath : candidate,
+    realpath: candidate => candidate === appBinary ? binary : candidate === bundle ? canonicalFixtureBundle() : candidate,
     macBundleTrustReasonAsync: check,
   };
   expect(Object.hasOwn(deps, "cwd")).toBe(false);

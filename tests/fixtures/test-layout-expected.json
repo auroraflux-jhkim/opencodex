@@ -534,6 +534,7 @@
   "codex-exec-invocation.test.ts": "codex-integration",
   "exec-trust-boundary.test.ts": "codex-integration",
   "exec-boundary-launch.test.ts": "codex-integration",
+  "exec-known-app-bundles.test.ts": "codex-integration",
   "messaging-local-discovery.test.ts": "codex-integration",
   "messaging-local-cli.test.ts": "codex-integration",
   "messaging-local-envelope.test.ts": "codex-integration",

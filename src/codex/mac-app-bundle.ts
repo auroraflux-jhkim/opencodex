@@ -33,14 +33,18 @@ export function realpathOrNull(path: string): string | null {
 }
 
 /**
- * Classify any path inside either bundle, including backing executables, by normalized and
- * canonical forms with a segment boundary: a symlinked HOME (or /tmp -> /private/tmp) must not
- * let a canonical bundle path skip the identity check or the handover exclusion.
+ * A known app name only routes to verification; it never grants trust. Inspect both the
+ * lexical and canonical ancestors so relocated bundles and CLI symlinks cannot skip the
+ * gate. Keep conventional-root aliases even when their canonical root has another name.
  */
 export function macCodexAppBundleFor(command: string, deps: MacCodexAppDeps): string | undefined {
   if ((deps.platform ?? process.platform) !== "darwin" || !posix.isAbsolute(command)) return undefined;
   const realpath = deps.realpath ?? realpathOrNull;
   const forms = [posix.normalize(command), realpath(command)].filter((form): form is string => Boolean(form));
+  for (const form of forms) {
+    const match = /^(.*?\/(?:ChatGPT|Codex)\.app)(?:\/|$)/i.exec(form);
+    if (match) return match[1];
+  }
   return macCodexAppBundles(deps).find(bundle => {
     const roots = [posix.normalize(bundle), realpath(bundle)].filter((root): root is string => Boolean(root));
     return forms.some(form => roots.some(root => form.startsWith(root + "/")));

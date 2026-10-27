@@ -18,7 +18,7 @@ import {
  * relative PATH entries resolve against that cwd, a slash in the command makes
  * it cwd/absolute-relative and PATH is skipped), classified by the shared
  * known-Codex-bundle classifier, and — when the lexical or canonical path sits
- * inside a conventional ChatGPT.app bundle — checked by the shared
+ * inside a ChatGPT.app or Codex.app bundle at any location — checked by the shared
  * signature/ownership policy before the same canonical target is returned for
  * execution. Anything else, including binaries inside third-party app bundles,
  * is passed through to the shared launcher unchanged.
@@ -113,7 +113,7 @@ function resolveDarwinExecPath(command: string, deps: CodexExecBoundaryDeps): { 
 
 /**
  * Canonical (bundleRoot, binary) pair when the resolved path classifies into a
- * conventional Codex desktop bundle, else null. The pair is always consistent:
+ * known Codex desktop bundle, else null. The pair is always consistent:
  * both halves are canonicalized together so a symlinked HOME or a PATH alias
  * cannot split the containment check, and a bundle member that cannot be
  * canonicalized refuses rather than escaping the known-bundle classification.
@@ -124,7 +124,12 @@ function darwinBundleTarget(resolved: string, deps: CodexExecBoundaryDeps): { bu
   if (!bundle) return null;
   const binary = realpath(resolved);
   if (binary === null) throw new CodexExecTrustError("cannot canonicalize the app-bundle exec target");
-  return { bundle: realpath(bundle) ?? bundle, binary };
+  const canonicalBundle = realpath(bundle);
+  if (canonicalBundle === null) throw new CodexExecTrustError("cannot canonicalize the app bundle");
+  if (!binary.startsWith(canonicalBundle + "/Contents/")) {
+    throw new CodexExecTrustError("the app-bundle exec target is outside bundle Contents");
+  }
+  return { bundle: canonicalBundle, binary };
 }
 
 /** Classification of this exact validated invocation, not a reusable trust grant. */

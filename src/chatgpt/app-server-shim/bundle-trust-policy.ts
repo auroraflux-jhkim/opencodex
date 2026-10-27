@@ -63,7 +63,7 @@ export function untrustedBundleFilesystemReason(
 ): string | null {
   const label = binary === undefined ? "app executable" : "app-server binary";
   binary ??= join(bundleRoot, "Contents", "MacOS", "ChatGPT");
-  const inside = relative(bundleRoot, binary);
+  const inside = relative(join(bundleRoot, "Contents"), binary);
   if (!inside || inside.startsWith("..") || inside.startsWith(sep)) return `the ${label} is outside the bundle`;
   const fileProblem = ownedSafely(deps, binary, "file");
   if (fileProblem) return `the ${label} ${fileProblem}`;
