@@ -11,7 +11,8 @@
  */
 import { loadConfig } from "../config";
 import { isWildcardHostname } from "../codex/loopback-target";
-import { readAlivePid, readRuntimePort, verifyPidIdentity } from "../config/process-state";
+import { isOcxCommandLine, readAlivePid, readProcessCommandLine, readRuntimePort, verifyPidIdentity } from "../config/process-state";
+import { loopbackFamilyAvailability } from "../lib/loopback-family";
 import {
   LOCAL_ATTESTATION_CHALLENGE_HEADER,
   LOCAL_ATTESTATION_PROOF_HEADER,
@@ -52,6 +53,9 @@ export interface LivenessIo {
    * Destructive callers only ever receive pids that passed this gate.
    */
   verifyPidFn?: (candidatePid: number) => number | null;
+  /** Fresh command-line evidence: undefined/empty is unreadable, never confirmed foreign. */
+  readCommandLineFn?: typeof readProcessCommandLine;
+  loopbackAvailabilityFn?: typeof loopbackFamilyAvailability;
   readRuntimeFn?: (pid?: number) => { pid?: number; port: number; hostname?: string } | null;
   configFn?: () => { port?: number; hostname?: string };
   timeoutMs?: number;
@@ -329,16 +333,16 @@ export function isConnectionRefused(error: unknown): boolean {
     if (depth >= 4) return false;
     if (current === null || (typeof current !== "object" && typeof current !== "function")) return false;
     const record = current as { code?: unknown; cause?: unknown; errors?: unknown };
-    if (record.code === "ECONNREFUSED" || record.code === "ConnectionRefused") return true;
-    if (typeof record.code === "string" && record.code.endsWith("ECONNREFUSED")) return true;
-    if (Array.isArray(record.errors) && record.errors.length > 0) {
+    if (record.errors !== undefined) {
       // One connect attempt fanned out over several addresses reports a single AggregateError.
       // Only a unanimous refusal proves the endpoint is free: a bundle that mixes ECONNREFUSED
       // with a timeout means one address answered nothing at all, and an address whose state is
       // unreadable is unknown, not absence. Collapsing it to "refused" is how a second runtime
       // gets started on a port that already has one.
-      return record.errors.every(error => visit(error, depth + 1));
+      return Array.isArray(record.errors) && record.errors.length > 0 && record.errors.every(error => visit(error, depth + 1));
     }
+    if (record.code === "ECONNREFUSED" || record.code === "ConnectionRefused") return true;
+    if (typeof record.code === "string" && record.code.endsWith("ECONNREFUSED")) return true;
     return visit(record.cause, depth + 1);
   };
   return visit(error, 0);
@@ -470,15 +474,22 @@ export type ProxyLivenessObservation =
   | { kind: "live"; live: LiveProxy }
   | { kind: "absent" | "unknown"; live: null };
 
-/** Same candidates and budgets as findLiveProxy; only definitive negatives permit recovery. */
+/** Recovery additionally covers both available loopback families and fresh PID identity. */
 export async function observeProxyLiveness(io: LivenessIo = {}): Promise<ProxyLivenessObservation> {
-  let alivePid = false, unknown = false;
+  let alivePid: number | null = null, unknown = false;
   const live = await discoverLiveProxy(io, {
-    pid: pid => { alivePid = pid !== null; },
+    pid: pid => { alivePid = pid; },
     endpoint: result => { if (result === "unknown") unknown = true; },
   });
   if (live) return { kind: "live", live };
-  return { kind: alivePid || unknown ? "unknown" : "absent", live: null };
+  if (alivePid !== null && !unknown) {
+    // A failed verifier alone conflates foreign with unreadable. Only fresh positive
+    // evidence of a foreign command line releases a reused PID; never signal it.
+    const commandLine = (io.readCommandLineFn ?? readProcessCommandLine)(alivePid);
+    unknown = !commandLine?.trim() || isOcxCommandLine(commandLine);
+    if (io.deadlineAt !== undefined && (io.nowFn ?? Date.now)() >= io.deadlineAt) unknown = true;
+  }
+  return { kind: unknown ? "unknown" : "absent", live: null };
 }
 
 /**
@@ -506,8 +517,22 @@ async function discoverLiveProxy(io: LivenessIo, observer?: {
   const budgetExhausted = (): boolean =>
     deadlineAt !== undefined && nowFn() >= deadlineAt;
   const expired = (): null => { observer?.endpoint("unknown"); return null; };
-  const probe = (port: number, opts: { hostname?: string; expectedPid?: number }) =>
-    proxyIdentityAtObserved(port, opts, probeIo, observer?.endpoint);
+  const probe = async (port: number, opts: { hostname?: string; expectedPid?: number }) => {
+    const hostname = opts.hostname?.trim();
+    if (!observer || (hostname && !/^localhost$/i.test(hostname) && !isWildcardHostname(hostname))) {
+      const identity = await proxyIdentityAtObserved(port, opts, probeIo, observer?.endpoint);
+      return identity ? { ...identity, hostname: opts.hostname } : null;
+    }
+    // Parallel families share the existing per-probe attempts/timeout and absolute
+    // deadline. A slow family cannot multiply the serial discovery budget.
+    const hosts = ["127.0.0.1", "[::1]"].filter(host =>
+      (io.loopbackAvailabilityFn ?? loopbackFamilyAvailability)(host) !== "unavailable");
+    const identities = await Promise.all(hosts.map(async hostname => {
+      const identity = await proxyIdentityAtObserved(port, { ...opts, hostname }, probeIo, observer.endpoint);
+      return identity ? { ...identity, hostname } : null;
+    }));
+    return identities.find(identity => identity !== null) ?? null;
+  };
 
   // The cheap pid is discovery-only. Before it can appear in a returned (killable) result
   // it must pass the full identity check AND the verifier must echo the exact candidate —
@@ -541,7 +566,7 @@ async function discoverLiveProxy(io: LivenessIo, observer?: {
         return {
           pid: trusted,
           port: runtime.port,
-          hostname: runtime.hostname,
+          hostname: identity.hostname,
           source: "runtime",
           ...(identity.version === undefined ? {} : { version: identity.version }),
           ...(identity.role === undefined ? {} : { role: identity.role }),
@@ -566,7 +591,7 @@ async function discoverLiveProxy(io: LivenessIo, observer?: {
       return {
         pid: verifiedReportedPid(identity.pid),
         port: record.port,
-        hostname: record.hostname,
+        hostname: identity.hostname,
         source: "runtime",
         ...(identity.version === undefined ? {} : { version: identity.version }),
         ...(identity.role === undefined ? {} : { role: identity.role }),
@@ -585,7 +610,7 @@ async function discoverLiveProxy(io: LivenessIo, observer?: {
     return {
       pid: verifiedReportedPid(identity.pid) ?? killablePid(pid),
       port,
-      hostname: config.hostname,
+      hostname: identity.hostname,
       source: "config",
       ...(identity.version === undefined ? {} : { version: identity.version }),
       ...(identity.role === undefined ? {} : { role: identity.role }),

@@ -62,7 +62,7 @@ for (const scenario of ["start", "ensure", "service", "supervised", "sibling", "
         if (budget !== liveness.START_OWNERSHIP_LIVENESS) throw new Error("changed liveness budget");
         events.push("probe:" + (++probes) + ":" + leased);
         return { ...budget, readPidFn: readAlivePid,
-          readRuntimeFn: () => ({ pid, port: 10100 }), verifyPidFn: candidate => candidate,
+          readRuntimeFn: () => ({ pid, port: 10100, hostname: "127.0.0.1" }), verifyPidFn: candidate => candidate,
           configFn: () => ({ port: 10100, hostname: "127.0.0.1" }), sleepFn: async () => {},
           fetchFn: async () => {
             attempts++;

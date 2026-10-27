@@ -5,7 +5,8 @@ const refused = () => Object.assign(new Error("connect refused"), { code: "ECONN
 const timeout = () => Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
 const io: LivenessIo = {
   readPidFn: () => null, readRuntimeFn: () => null, verifyPidFn: pid => pid,
-  configFn: () => ({ port: 10100 }), sleepFn: async () => {}, attempts: 3,
+  configFn: () => ({ port: 10100, hostname: "127.0.0.1" }), sleepFn: async () => {}, attempts: 3,
+  readCommandLineFn: () => "ocx start",
 };
 
 for (const [name, fetchFn, kind, attempts] of [
