@@ -1,3 +1,4 @@
+import { createCodexCliTestRoot } from "../helpers/codex-cli-fixture-root";
 /**
  * Worker-dispatch integration coverage for the Codex CLI update offload.
  *
@@ -54,7 +55,7 @@ function snapshot(configDir: string): NonNullable<Snapshot> {
   };
 }
 function home() {
-  const root = mkdtempSync(join(tmpdir(), "ocx-update-worker-"));
+  const root = createCodexCliTestRoot("ocx-update-worker-");
   roots.push(root);
   return root;
 }
@@ -637,4 +638,3 @@ describe("snapshot target does not fall back to ambient homes", () => {
     }
   });
 });
-

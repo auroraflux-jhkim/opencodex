@@ -69,6 +69,7 @@ import {
   CODEX_CLI_JOB_STORE_MAX_BYTES, CodexCliJobStoreBusyError,
 } from "./cli-update-job-execution";
 import { windowsCanonicalPathMatches } from "./windows-installation-files";
+import { toNamespacedPath } from "node:path";
 
 const KERNEL_SYMBOLS = {
   GetDriveTypeW: { args: ["ptr"], returns: "u32" },
@@ -388,7 +389,12 @@ function renamePinned(ctx: Ctx, handle: bigint, destination: string): void {
 }
 
 async function verifyAcl(entries: readonly WindowsAclEntry[]): Promise<void> {
-  if (!await verifyWindowsEntriesAclAsync(entries, ACL_VERIFY_TIMEOUT_MS)) throw unsafe();
+  if (!await verifyWindowsEntriesAclAsync(aclTargets(entries), ACL_VERIFY_TIMEOUT_MS)) throw unsafe();
+}
+
+// External descriptor readers need extended-length targets for long paths.
+function aclTargets(entries: readonly WindowsAclEntry[]): WindowsAclEntry[] {
+  return entries.map(entry => ({ ...entry, path: toNamespacedPath(entry.path) }));
 }
 
 interface ChainEntry {
@@ -462,7 +468,7 @@ async function prepareStore(
     mkdirSync(config);
     configPin = relOpen(ctx, parentPin.handle, configName, true, ACCESS_READ, SHARE_DIR);
     inspect(ctx, configPin, true);
-    await hardenSecretDirAsync(config, { required: true });
+    await hardenSecretDirAsync(toNamespacedPath(config), { required: true });
     configPrivate = true;
   }
   assertCanonicalPath(ctx, configPin, config);
@@ -481,7 +487,7 @@ async function prepareStore(
     mkdirSync(dir);
     jobdir = relOpen(ctx, configPin, CODEX_CLI_JOB_STORE_DIR, true, jobdirAccess, SHARE_DIR);
     inspect(ctx, jobdir, true);
-    await hardenSecretDirAsync(dir, { required: true });
+    await hardenSecretDirAsync(toNamespacedPath(dir), { required: true });
     await verifyAcl([{ path: dir, directory: true, policy: "private" }]);
   }
   return { config, dir, file, lock, jobdir };
@@ -531,7 +537,7 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
     if (stat.links !== 1 || stat.size !== bytes) throw unsafe();
     if (!readAll(ctx, leaf, stat.size).equals(Buffer.from(body))) throw unsafe();
     tempIdentity = stat;
-    await hardenSecretPathAsync(temp, { required: true, timeoutMemoKey: prepared.file });
+    await hardenSecretPathAsync(toNamespacedPath(temp), { required: true, timeoutMemoKey: prepared.file });
     await verifyAcl([{ path: temp, directory: false, policy: "private" }]);
     renamePinned(ctx, leaf, prepared.file);
     publishedName = true;
@@ -561,7 +567,7 @@ async function writeStoreBody(ctx: Ctx, prepared: Prepared, body: string): Promi
         } else if (leaf === undefined) unlinkSync(temp);
       } catch { /* unprovable cleanup stays fail-closed */ }
     }
-    forgetEphemeralSecretPath(temp);
+    forgetEphemeralSecretPath(toNamespacedPath(temp));
     if (leaf !== undefined) ctx.pins.release(leaf, ctx.kernel);
   }
 }
@@ -630,8 +636,8 @@ async function acquireLock(ctx: Ctx, prepared: Prepared): Promise<HeldLock> {
     ownerIdentity = inspect(ctx, owner, false);
     if (ownerIdentity.links !== 1 || ownerIdentity.size !== recordBytes) throw unsafe();
     if (!readAll(ctx, owner, recordBytes).equals(Buffer.from(record))) throw unsafe();
-    await hardenSecretDirAsync(prepared.lock, { required: true });
-    await hardenSecretPathAsync(ownerPath, { required: true });
+    await hardenSecretDirAsync(toNamespacedPath(prepared.lock), { required: true });
+    await hardenSecretPathAsync(toNamespacedPath(ownerPath), { required: true });
     await verifyAcl([
       { path: prepared.lock, directory: true, policy: "private" },
       { path: ownerPath, directory: false, policy: "private" },
