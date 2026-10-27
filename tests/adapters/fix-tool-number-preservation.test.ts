@@ -68,6 +68,21 @@ describe("tool argument numeric preservation", () => {
       schema,
     )).toBe('{"count":1,"id":9007199254740993,"amount":0.123456789012345678901,"near":9007199254740990.5,"ratio":1.50,"big":1E2,"plain":2}');
   });
+  test("never repairs a token whose text is not an exact integer", () => {
+    const integers = {
+      type: "object",
+      properties: {
+        count: { type: "integer" }, tiny: { type: "integer" }, near: { type: "integer" },
+        exact: { type: "integer" }, label: { type: "string" },
+      },
+    };
+    expect(coerceIntegerToolArguments(
+      '{"count":1.0,"tiny":1e-400,"near":9007199254740990.5,"exact":1.2e3,"label":1e-400}',
+      integers,
+    )).toBe('{"count":1,"tiny":1e-400,"near":9007199254740990.5,"exact":1200,"label":1e-400}');
+    expect(coerceIntegerToolArguments('{"tiny":1e-400,"near":9007199254740990.5}', integers))
+      .toBe('{"tiny":1e-400,"near":9007199254740990.5}');
+  });
   test("placeholder selection avoids colliding strings and stays linear in the input", () => {
     const colliding = '{"count":1.0,"a":"\\u0000ocx-number:0:0","b":"\\u0000ocx-number:1:x"}';
     expect(coerceIntegerToolArguments(colliding, schema))

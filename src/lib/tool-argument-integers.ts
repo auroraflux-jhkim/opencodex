@@ -168,7 +168,12 @@ function coerceValue(
   // escaped strings that resemble a placeholder, keep their original type and bytes.
   const token = typeof value === "string" ? numbers.get(value) : undefined;
   if (token) {
-    const result = coerceValue(Number(token.raw), schema, root, depth, numbers, toolName, propertyName);
+    const numeric = Number(token.raw);
+    // Number() can round a non-integral token onto an integer (1e-400 -> 0, or
+    // 9007199254740990.5 -> 9007199254740990). Such a token never counts as integral:
+    // it keeps its bytes so the client sees the value that was actually sent.
+    if (Number.isInteger(numeric) && !tokenDenotesInteger(token.raw)) return { value, changed: false };
+    const result = coerceValue(numeric, schema, root, depth, numbers, toolName, propertyName);
     if (result.changed) token.replacement = JSON.stringify(result.value);
     return result;
   }
@@ -238,6 +243,18 @@ function coerceValue(
 
 const JSON_STRING_OR_NUMBER = /"(?:[^"\\]|\\.)*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
 const INTEGRAL_FLOAT_TOKEN = /^-?(?:0|[1-9]\d*)\.0+$/;
+
+/** True when a JSON number token's exact decimal value is an integer, judged from its text. */
+function tokenDenotesInteger(raw: string): boolean {
+  const match = /^-?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(raw);
+  if (!match) return false;
+  const digits = match[1]! + (match[2] ?? "");
+  const exponent = Number(match[3] ?? "0");
+  if (!Number.isFinite(exponent)) return false;
+  const point = match[1]!.length + exponent;
+  const fraction = point <= 0 ? digits : digits.slice(point);
+  return /^0*$/.test(fraction);
+}
 
 /**
  * Mask numbers before schema traversal and retain their original positions. A prefix absent
