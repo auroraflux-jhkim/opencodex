@@ -4,22 +4,39 @@ import { atomicWriteFileNoFollow } from "./atomic-write";
 import { isPassiveRead } from "../lib/passive-read";
 import { redactUserPath } from "../lib/redact";
 import { sanitizeRemovedOpenCodeFreeForLoad } from "./removed-opencode-free";
+import { verifySecretPathAcl, windowsSecretAclApplies } from "../lib/windows-secret-acl";
 
 let warned = false;
 
 /** Inspect occupants without following links or modifying their permissions. */
-function holdsOriginal(path: string, original: Uint8Array): boolean {
+function holdsOriginal(path: string, original: Uint8Array, retries = 3): boolean {
   let descriptor: number | undefined;
   try {
     const entry = lstatSync(path, { bigint: true });
-    if (!entry.isFile() || entry.nlink !== 1n || entry.dev === 0n || entry.ino === 0n) return false;
+    if (!entry.isFile() || entry.dev === 0n || entry.ino === 0n) return false;
     descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     const opened = fstatSync(descriptor, { bigint: true });
     if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino) return false;
     const bytes = readFileSync(descriptor);
+    if (!bytes.equals(Buffer.from(original))) return false;
+    if (opened.nlink > 1n) {
+      // Exclusive publication briefly links its private temp to the final name.
+      // A persistent hard link remains ineligible; do not spin or certify it.
+      if (retries === 0) return false;
+      closeSync(descriptor);
+      descriptor = undefined;
+      Bun.sleepSync(10);
+      return holdsOriginal(path, original, retries - 1);
+    }
+    const protectedFile = windowsSecretAclApplies()
+      ? verifySecretPathAcl(path)
+      : (opened.mode & 0o7777n) === 0o600n && typeof process.getuid === "function" && opened.uid === BigInt(process.getuid());
+    if (!protectedFile) return false;
+    const final = fstatSync(descriptor, { bigint: true });
     const after = lstatSync(path, { bigint: true });
-    return after.isFile() && after.dev === opened.dev && after.ino === opened.ino
-      && bytes.equals(Buffer.from(original));
+    return final.nlink === 1n && final.ctimeNs === opened.ctimeNs
+      && after.isFile() && after.nlink === 1n && after.dev === opened.dev && after.ino === opened.ino
+      && after.ctimeNs === opened.ctimeNs;
   } catch { return false; }
   finally { if (descriptor !== undefined) { try { closeSync(descriptor); } catch { /* optional read only */ } } }
 }

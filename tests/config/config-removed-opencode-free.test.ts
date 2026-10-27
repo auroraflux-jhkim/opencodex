@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { armClaudeCodeBaseline, getConfigPath, getDefaultConfig, loadConfig, mutatePersistedConfig, saveConfigPreservingClaudeCode } from "../../src/config";
 import { configDiagnosticsFromRaw, readConfigAdmissionSnapshot, readConfigDiagnostics } from "../../src/config/diagnostics";
@@ -11,6 +11,8 @@ import { planWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../src/we
 import { createTempHome } from "../helpers/temp-home";
 import { repoPath } from "../helpers/repo-root";
 import { runPassiveRead } from "../../src/lib/passive-read";
+import { atomicWriteFileNoFollow } from "../../src/config/atomic-write";
+import { join } from "node:path";
 
 test("retired OpenCode Free entries warn once on load and an unrelated save persists their removal", () => {
   const home = createTempHome("ocx-removed-provider-");
@@ -197,12 +199,161 @@ test.each(["file", "directory"])("an unrelated %s at the recovery name gets an e
 test("an identical original recovery copy is reused without another sibling", () => {
   withLegacyConfig({}, bytes => {
     const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
-    writeFileSync(backup, bytes);
+    atomicWriteFileNoFollow(backup, bytes, undefined, {}, { exclusive: true });
+    const protection = recoveryProtection(backup);
     loadConfig();
     expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
+    expect(recoveryProtection(backup)).toEqual(protection);
     expect(readdirSync(process.env.OPENCODEX_HOME!).filter(name => name.endsWith(".bak"))).toHaveLength(1);
   });
 });
+
+function recoveryProtection(path: string): string | number {
+  if (process.platform !== "win32") {
+    const entry = statSync(path);
+    expect(entry.uid).toBe(process.getuid!());
+    expect(entry.mode & 0o7777).toBe(0o600);
+    return entry.mode & 0o7777;
+  }
+  const acl = Bun.spawnSync([join(process.env.SystemRoot!, "System32", "icacls.exe"), path]);
+  expect(acl.exitCode).toBe(0);
+  const lines = acl.stdout.toString().replaceAll("\r", "").split("\n");
+  const aces = [lines[0]!.slice(path.length).trim(), ...lines.slice(1).filter(line => /^\s+\S/.test(line)).map(line => line.trim())];
+  expect(aces).toHaveLength(1);
+  expect(aces[0]).toMatch(/:\(F\)$/);
+  return aces[0]!;
+}
+
+test("an identical recovery with broad permissions is preserved and gets a protected sibling", () => {
+  withLegacyConfig({}, bytes => {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    atomicWriteFileNoFollow(backup, bytes, undefined, {}, { exclusive: true });
+    let priorAcl = "";
+    const icacls = join(process.env.SystemRoot ?? "", "System32", "icacls.exe");
+    if (process.platform === "win32") {
+      expect(Bun.spawnSync([icacls, backup, "/grant", "*S-1-1-0:(R)"]).exitCode).toBe(0);
+      priorAcl = Bun.spawnSync([icacls, backup]).stdout.toString();
+    } else chmodSync(backup, 0o644);
+    loadConfig();
+    readConfigDiagnostics();
+    const copies = readdirSync(process.env.OPENCODEX_HOME!).filter(name => name.endsWith(".bak"));
+    expect(copies).toHaveLength(2);
+    const sibling = copies.find(name => name !== "config.json.pre-opencode-free-removal.bak")!;
+    expect(readFileSync(join(process.env.OPENCODEX_HOME!, sibling))).toEqual(Buffer.from(bytes));
+    recoveryProtection(join(process.env.OPENCODEX_HOME!, sibling));
+    expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
+    if (process.platform === "win32") expect(Bun.spawnSync([icacls, backup]).stdout.toString()).toBe(priorAcl);
+    else expect(statSync(backup).mode & 0o7777).toBe(0o644);
+  });
+});
+
+test.each(["compliant", "broad", "unverifiable"])("recovery reuse checks the existing Windows ACL: %s", policy => {
+  const home = createTempHome("ocx-recovery-acl-probe-");
+  try {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    atomicWriteFileNoFollow(backup, "original", undefined, {}, { exclusive: true });
+    const module = (path: string) => pathToFileURL(repoPath(path)).href;
+    const script = `import { setPlatformForTests, setIcaclsRunnerForTests } from ${JSON.stringify(module("src/lib/windows-secret-acl.ts"))};
+      import { setWindowsPrincipalRunnerForTests } from ${JSON.stringify(module("src/lib/windows-user-principal.ts"))};
+      import { preserveRemovedOpenCodeFree } from ${JSON.stringify(module("src/config/removed-opencode-free-backup.ts"))};
+      setPlatformForTests('win32');
+      setWindowsPrincipalRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: 'S-1-5-21-9-9-9-1001\\r\\nTESTHOST\\\\tester' }));
+      const commands = [];
+      setIcaclsRunnerForTests(args => {
+        const existing = args[0] === ${JSON.stringify(backup)};
+        if (existing) commands.push(args);
+        const policy = ${JSON.stringify(policy)};
+        return { success: !(existing && policy === 'unverifiable'), exitCode: existing && policy === 'unverifiable' ? 1 : 0, timedOut: false,
+          stdout: args[0] + ' TESTHOST\\\\tester:(F)\\n' + (existing && policy === 'broad' ? '  Everyone:(R)\\n' : '') + '\\n' };
+      });
+      preserveRemovedOpenCodeFree(${JSON.stringify(getConfigPath())}, Buffer.from('original'));
+      console.log(JSON.stringify(commands));`;
+    const child = Bun.spawnSync([process.execPath, "--eval", script], { env: { ...process.env } });
+    expect(child.exitCode).toBe(0);
+    const commands = JSON.parse(child.stdout.toString()) as string[][];
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.every(args => args.length === 1 && args[0] === backup)).toBe(true);
+    expect(readdirSync(home.root).filter(name => name.endsWith(".bak"))).toHaveLength(policy === "compliant" ? 1 : 2);
+    expect(readFileSync(backup, "utf8")).toBe("original");
+  } finally { home.remove(); }
+});
+
+test("a recovery that remains multiply linked is never certified", () => {
+  withLegacyConfig({}, bytes => {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    atomicWriteFileNoFollow(backup, bytes, undefined, {}, { exclusive: true });
+    linkSync(backup, join(process.env.OPENCODEX_HOME!, "foreign-link"));
+    const sleep = spyOn(Bun, "sleepSync").mockImplementation(() => {});
+    try {
+      loadConfig();
+      expect(sleep.mock.calls.length).toBeGreaterThan(0);
+      expect(sleep.mock.calls.length).toBeLessThanOrEqual(9);
+      expect(sleep.mock.calls.every(([delay]) => delay === 10)).toBe(true);
+    } finally { sleep.mockRestore(); }
+    expect(statSync(backup).nlink).toBe(2);
+    const copies = readdirSync(process.env.OPENCODEX_HOME!).filter(name => name.endsWith(".bak"));
+    expect(copies).toHaveLength(2);
+    const sibling = copies.find(name => name !== "config.json.pre-opencode-free-removal.bak")!;
+    recoveryProtection(join(process.env.OPENCODEX_HOME!, sibling));
+    expect(readFileSync(join(process.env.OPENCODEX_HOME!, sibling))).toEqual(Buffer.from(bytes));
+  });
+});
+
+test("overlapping process loads reuse a recovery after publication unlinks its temp", async () => {
+  const home = createTempHome("ocx-recovery-overlap-");
+  const ready = home.path("publisher-ready");
+  const release = home.path("publisher-release");
+  const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+  const module = pathToFileURL(repoPath("src/config.ts")).href;
+  const bytes = Buffer.from(JSON.stringify({ ...getDefaultConfig(), providers: { "opencode-free": {} } }));
+  writeFileSync(getConfigPath(), bytes);
+  const firstScript = `import { mock } from 'bun:test'; import * as fs from 'node:fs';
+    const real = {...fs}; let paused = false;
+    mock.module('node:fs', () => ({...real, linkSync(source, target) {
+      real.linkSync(source, target);
+      if (!paused && target === ${JSON.stringify(backup)}) {
+        paused = true; real.writeFileSync(${JSON.stringify(ready)}, 'ready');
+        const until = Date.now() + 20000;
+        while (!real.existsSync(${JSON.stringify(release)})) {
+          if (Date.now() >= until) throw new Error('publisher release timed out');
+          Bun.sleepSync(5);
+        }
+      }
+    }})); const { loadConfig } = await import(${JSON.stringify(module)}); loadConfig();`;
+  const first = Bun.spawn([process.execPath, "--eval", firstScript], { env: { ...process.env }, stdout: "ignore", stderr: "pipe" });
+  let second: ReturnType<typeof Bun.spawn> | undefined;
+  try {
+    const until = Date.now() + 15000;
+    while (!existsSync(ready) && Date.now() < until) await Bun.sleep(5);
+    expect(existsSync(ready)).toBe(true);
+    expect(statSync(backup).nlink).toBe(2);
+    // Only control the scheduler: the publisher performs its own real unlink.
+    const secondScript = `import * as fs from 'node:fs'; const sleep = Bun.sleepSync;
+      Bun.sleepSync = ms => {
+        fs.writeFileSync(${JSON.stringify(release)}, 'release');
+        const until = Date.now() + 10000;
+        while (fs.statSync(${JSON.stringify(backup)}).nlink !== 1) {
+          if (Date.now() >= until) throw new Error('publisher unlink timed out');
+          sleep(5);
+        }
+        sleep(ms);
+      }; const { loadConfig } = await import(${JSON.stringify(module)}); loadConfig();`;
+    second = Bun.spawn([process.execPath, "--eval", secondScript], { env: { ...process.env }, stdout: "ignore", stderr: "pipe" });
+    expect(await second.exited).toBe(0);
+    writeFileSync(release, "release");
+    expect(await first.exited).toBe(0);
+    expect(readdirSync(home.root).filter(name => name.endsWith(".bak"))).toEqual(["config.json.pre-opencode-free-removal.bak"]);
+    expect(readdirSync(home.root).filter(name => name.endsWith(".tmp"))).toEqual([]);
+    expect(readFileSync(backup)).toEqual(bytes);
+    expect(statSync(backup).nlink).toBe(1);
+    recoveryProtection(backup);
+  } finally {
+    writeFileSync(release, "release");
+    await first.exited;
+    if (second) await second.exited;
+    home.remove();
+  }
+}, 60000);
 
 test("late retired disk edits are preserved byte for byte by live saves", () => {
   const home = createTempHome("ocx-late-retired-");

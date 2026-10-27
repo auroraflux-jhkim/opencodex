@@ -837,8 +837,8 @@ function shouldVerifyExistingAcl(): boolean {
   return env["OPENCODEX_ACL_VERIFY_EXISTING"] === "1";
 }
 
-function existingAclAlreadyCompliant(targetPath: string, directory: boolean, deadline: number): boolean {
-  if (!shouldVerifyExistingAcl()) return false;
+function existingAclAlreadyCompliant(targetPath: string, directory: boolean, deadline: number, forceProbe = false): boolean {
+  if (!forceProbe && !shouldVerifyExistingAcl()) return false;
   const identity = cachedCurrentWindowsIdentity();
   if (!identity) return false;
   try {
@@ -849,6 +849,16 @@ function existingAclAlreadyCompliant(targetPath: string, directory: boolean, dea
   } catch {
     return false;
   }
+}
+
+/** Read-only owner-only verification; never harden or trust a prior success memo. */
+export function verifySecretPathAcl(targetPath: string): boolean {
+  if (!windowsSecretAclApplies()) return false;
+  const deadline = nowFn() + resolveHardenDeadlineMs();
+  try {
+    currentWindowsPrincipal(deadline);
+    return existingAclAlreadyCompliant(targetPath, false, deadline, true);
+  } catch { return false; }
 }
 
 async function existingAclAlreadyCompliantAsync(
