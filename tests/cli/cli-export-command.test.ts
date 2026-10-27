@@ -389,16 +389,16 @@ describe("ocx export with no live proxy (accept criterion 5)", () => {
     writeFileSync(
       join(home, "config.json"),
       JSON.stringify({
-        // A configured zero is an absent endpoint, never an allocatable port
-        // another process can turn into a proxy between setup and discovery.
-        port: 0,
+        // The child preload injects ECONNREFUSED at this exact endpoint.
+        port: 42101,
         defaultProvider: "mock",
         providers: { mock: { adapter: "openai-chat", baseUrl: "http://127.0.0.1/v1", allowPrivateNetwork: true } },
       }),
       "utf8",
     );
 
-    const result = spawnSync(process.execPath, [cliPath, "export", "--client", "opencode", "--json"], {
+    const preload = join(repoRoot, "tests", "fixtures", "refused-local-probe-preload.ts");
+    const result = spawnSync(process.execPath, ["--preload", preload, cliPath, "export", "--client", "opencode", "--json"], {
       cwd: repoRoot,
       env: { ...process.env, OPENCODEX_HOME: home },
       encoding: "utf8",
@@ -406,6 +406,7 @@ describe("ocx export with no live proxy (accept criterion 5)", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("[refused-probe] ECONNREFUSED");
     expect(result.stderr).toContain("ocx start");
     // Routed by the dispatcher, not swallowed by the unknown-command branch.
     expect(result.stderr).not.toContain("Unknown command");
