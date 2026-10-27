@@ -9,7 +9,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
     ? value as Record<string, unknown> : undefined;
 }
 
-/** Load-only projection, like the OpenCode wire upgrades: never rewrites config.json. */
+/** Load projection, like the OpenCode wire upgrades: the next configuration save persists it. */
 export function sanitizeRemovedOpenCodeFreeForLoad(parsed: unknown): void {
   const config = record(parsed);
   if (!config) return;
@@ -141,6 +141,6 @@ export function sanitizeRemovedOpenCodeFreeForLoad(parsed: unknown): void {
   }
   if (changed && !warned) {
     warned = true;
-    console.warn("opencode-free support was removed because every free model now returns 403 permission_denied under OpenCode's upstream free-tier gate (#7255); the entry and dependent references are disabled. Use opencode-go, or another provider such as opencode-zen or openrouter.");
+    console.warn("opencode-free support was removed because every free model now returns 403 permission_denied under OpenCode's upstream free-tier gate (#7255); the entry and dependent references are disabled. The next configuration save removes them from config.json; keep a copy of config.json first if you need the old entry. Use opencode-go, or another provider such as opencode-zen or openrouter.");
   }
 }

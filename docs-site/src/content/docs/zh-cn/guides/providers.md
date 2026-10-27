@@ -307,7 +307,7 @@ MiniMax 和 MiniMax (CN) 的提供商卡片也会在配置的密钥有有效 Cod
 
 在规范 `opencode-zen` 提供商中，使用 API 密钥认证和官方路由 `https://opencode.ai/zen/v1` 或 `https://opencode.ai/inference/v1` 时，Gemini 会在默认 `googleMode: ai-studio` 下自动使用 Google 原生 API。Zen 模型 ID 保持不变，包括没有 `-tiered` 后缀的 Flash ID。Claude 使用 Anthropic Messages，不受 `googleMode` 影响。加载已保存的配置时，仅忽略这些原生模型符合条件的旧 Chat/Responses 覆盖设置，以及符合条件的 Responses 专用 `image_generation` 托管工具偏好。自定义提供商、非密钥认证路由及其他偏好保持不变。
 
-**已移除 `opencode-free` 支持。** OpenCode 的上游免费层级门槛导致所有模型均返回 `403 permission_denied`（[#7255](https://github.com/lidge-jun/opencodex/issues/7255)）。加载现有配置时，会在内存中禁用相关条目和依赖的模型引用，每个进程仅警告一次，不修改文件。如果它原来是默认提供商，将改用标准 OpenAI OAuth 路径作为默认值。请使用 `opencode-go`、需要密钥的 `opencode-zen` 或其他提供商。[OpenCode Zen 条款](https://opencode.ai/docs/zen/)。
+**已移除 `opencode-free` 支持。** OpenCode 的上游免费层级门槛导致所有模型均返回 `403 permission_denied`（[#7255](https://github.com/lidge-jun/opencodex/issues/7255)）。加载现有配置时，会在内存中禁用相关条目和依赖的模型引用，每个进程仅警告一次，加载时不修改文件。下次保存配置时，这些条目及引用将从 config.json 中移除；如果需要保留旧条目，请先备份 config.json。如果它原来是默认提供商，将改用标准 OpenAI OAuth 路径作为默认值。请使用 `opencode-go`、需要密钥的 `opencode-zen` 或其他提供商。[OpenCode Zen 条款](https://opencode.ai/docs/zen/)。
 
 保留正常的 Claude Desktop 分配和默认值。源模型允许列表变空的规则会被禁用；注入模型被移除时，原生子代理同步也会被禁用。后续保存配置时不会恢复已移除的引用，并会保留正常的并发编辑。
 

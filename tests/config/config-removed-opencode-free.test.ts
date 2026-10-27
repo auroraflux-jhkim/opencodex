@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
-import { armClaudeCodeBaseline, getConfigPath, getDefaultConfig, loadConfig, saveConfigPreservingClaudeCode } from "../../src/config";
+import { armClaudeCodeBaseline, getConfigPath, getDefaultConfig, loadConfig, mutatePersistedConfig, saveConfigPreservingClaudeCode } from "../../src/config";
 import { readConfigDiagnostics } from "../../src/config/diagnostics";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
 import { buildClaudeReplayConfig } from "../../src/server/claude-messages";
@@ -9,7 +9,7 @@ import { planVisionSidecar, shouldResolveOpenAiVisionSidecar } from "../../src/v
 import { planWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../src/web-search";
 import { createTempHome } from "../helpers/temp-home";
 
-test("retired OpenCode Free entries and dependent routes are skipped on load, once per process", () => {
+test("retired OpenCode Free entries warn once on load and an unrelated save persists their removal", () => {
   const home = createTempHome("ocx-removed-provider-");
   const warn = spyOn(console, "warn").mockImplementation(() => {});
   try {
@@ -42,7 +42,7 @@ test("retired OpenCode Free entries and dependent routes are skipped on load, on
       modelPickerOrder: ["opencode-free/big-pickle", "healthy/keep"],
     };
     const bytes = JSON.stringify(raw, null, 2);
-    writeFileSync(getConfigPath(), bytes);
+    writeFileSync(getConfigPath(), bytes, "utf8");
     const loaded = loadConfig();
     expect(Object.keys(loaded.providers).sort()).toEqual(["healthy", "openai"]);
     expect(loaded.defaultProvider).toBe("openai");
@@ -67,6 +67,18 @@ test("retired OpenCode Free entries and dependent routes are skipped on load, on
     expect(warnings[0]![0]).toContain("opencode-go");
     expect(warnings[0]![0]).not.toMatch(/\b\d+\.\d+\.\d+\b/);
     expect(PROVIDER_REGISTRY.some(entry => entry.id === "opencode-free")).toBe(false);
+    const outcome = mutatePersistedConfig(config => {
+      config.port = 19876;
+      return { changed: true, value: undefined };
+    });
+    expect(outcome.status).toBe("committed");
+    const persisted = JSON.parse(readFileSync(getConfigPath(), "utf8"));
+    expect(persisted.port).toBe(19876);
+    expect(persisted.providers["opencode-free"]).toBeUndefined();
+    expect(Object.keys(persisted.providers).sort()).toEqual(["healthy", "openai"]);
+    expect(persisted.providers.healthy).toEqual(loaded.providers.healthy);
+    expect(persisted.subagentModels).toEqual(["healthy/keep"]);
+    expect(warnings[0]![0]).toContain("next configuration save removes them from config.json");
   } finally { warn.mockRestore(); home.remove(); }
 });
 
