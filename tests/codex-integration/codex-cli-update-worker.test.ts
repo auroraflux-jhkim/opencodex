@@ -8,8 +8,7 @@ import { createCodexCliTestRoot } from "../helpers/codex-cli-fixture-root";
  * operations have their own regression cases elsewhere.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CodexCliApplyDeps } from "../../src/codex/cli-update-apply";
 import type { TrustedNodeLaunchContext } from "../../src/cli/launcher-context";
@@ -178,7 +177,7 @@ afterEach(async () => {
 });
 describe("process-wide selection commit gate and cancellation fence", () => {
   test("only the dead pre-spawn owner's generation can recover installation admission", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-generation-close-")), configDir = join(root, "config");
+    const root = createCodexCliTestRoot("ocx-generation-close-"), configDir = join(root, "config");
     roots.push(root); mkdirSync(configDir, { mode: 0o700 });
     if (process.platform === "win32") {
       await hardenSecretDirAsync(root, { required: true });

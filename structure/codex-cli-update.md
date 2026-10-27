@@ -466,9 +466,9 @@ cleanup permanently for the invocation, including failures during published-name
 The store checks the held ancestors and config root against the normalized DOS long name with
 the same comparison used by `src/codex/windows-installation-files.ts`; 8.3 aliases refuse before
 ledger access, and a missing config root is created only beneath an already canonical held parent.
-
-Ledger hardening and long-path ACL descriptor reads use extended-length command targets.
-Native pins and canonical DOS-path comparisons retain the alias refusal policy.
+ACL hardening and descriptor reads use extended-length command targets, including recovery
+publication, ledger temps, admission locks and apply leases. Native pinning and alias comparisons
+retain canonical long DOS paths; command spelling does not admit an aliased mutation root.
 
 An ACL-query timeout fails closed without accepting a late result. Its PowerShell child may still
 hold transient handles while termination settles, so lock cleanup may fail and retain a busy mutex;

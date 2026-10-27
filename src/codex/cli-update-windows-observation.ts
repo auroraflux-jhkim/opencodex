@@ -32,7 +32,9 @@ function inventory(prefix: string) {
       throw new Error("installation_path_unverified");
     }
     validate(relative, st.isDirectory());
-    acl.push({ path, directory: st.isDirectory(), policy: "write-private" });
+    // Descriptor readers need extended-length targets; inventory/native identity
+    // paths retain their canonical DOS spelling.
+    acl.push({ path: win32.toNamespacedPath(path), directory: st.isDirectory(), policy: "write-private" });
     if (st.isDirectory()) {
       directories.push(`${relative}:${st.dev}:${st.ino}`);
       for (const name of readdirSync(path).sort()) walk(`${relative}/${name}`);

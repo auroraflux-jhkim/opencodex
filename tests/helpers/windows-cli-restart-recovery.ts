@@ -40,7 +40,7 @@ if (role && root) {
         if(fs.existsSync(p.join(r,'stop'))){clearInterval(timer);process.exit(0)}},5);`);
     const plan = await createCodexCliUpdatePlan(f.deps);
     if (!plan.applicable || !plan.planId) throw new Error("fixture_plan_refused");
-    await applyCodexCliUpdate(plan.planId, { ...f.deps, commitWindow,
+    const result = await applyCodexCliUpdate(plan.planId, { ...f.deps, commitWindow,
       startWindowsChild(invocation) {
         if (invocation.policy !== "installer") throw new Error("unexpected_fixture_child");
         const child = startWindowsCliChild({ ...invocation, executable: process.execPath,
@@ -61,6 +61,6 @@ if (role && root) {
         return child;
       },
     });
-    throw new Error("owner_did_not_exit_in_native_wait");
+    throw new Error("owner_did_not_exit_in_native_wait: " + JSON.stringify(result));
   }
 }

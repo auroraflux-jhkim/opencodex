@@ -1,8 +1,8 @@
+import { createCodexCliTestRoot } from "../helpers/codex-cli-fixture-root";
 import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
-import { tmpdir } from "node:os";
 import { trustWindowsTempFixtureAncestry, windowsTempAncestryPreload } from "../helpers/windows-temp-ancestry";
 import { afterEach, expect, test } from "bun:test";
-import { cpSync, realpathSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, renameSync, symlinkSync, unlinkSync, linkSync } from "node:fs";
+import { cpSync, realpathSync, copyFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, symlinkSync, unlinkSync, linkSync } from "node:fs";
 import { join, dirname, parse } from "node:path";
 import { applyCodexCliUpdate } from "../../src/codex/cli-update-apply";
 import { createCodexCliUpdatePlan } from "../../src/codex/cli-update-plan";
@@ -115,7 +115,7 @@ async function fixture(executable?: Buffer, onCreated?: (root: string) => void) 
   // every profile. Evaluate actual ancestry ACL/owner/reparse evidence instead.
   // Create only this test-owned directory below the repository's volume anchor;
   // never repair or suppress metadata on the host's existing ancestor directories.
-  const root = mkdtempSync(join(tmpdir(), "ocx-win-apply-"));
+  const root = createCodexCliTestRoot("ocx-win-apply-");
   onCreated?.(root); roots.push(root);
   await hardenSecretDirAsync(root, { required: true });
   trustWindowsTempFixtureAncestry(root);
@@ -528,7 +528,7 @@ native("Windows toolchain pins survive an awaited callback; bounded shared prefi
 native("Windows shared prefix preserves unrelated package and shims while executing x64 backing", async () => {
   // Use the existing Windows compiler, with no package install or downloaded binary.
   // This is a CLR x64 executable fixture with actual Win32 Job observation, not vendor Codex.
-  const build = mkdtempSync(join(tmpdir(), "ocx-win-apply-")); roots.push(build);
+  const build = createCodexCliTestRoot("ocx-win-apply-"); roots.push(build);
   const source = join(build, "Backing.cs"), exe = join(build, "backing.exe"), trace = join(build, "native.json");
   write(source, [
     'using System; using System.IO; using System.Runtime.InteropServices;',

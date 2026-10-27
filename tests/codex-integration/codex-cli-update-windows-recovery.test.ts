@@ -1,7 +1,7 @@
+import { createCodexCliTestRoot } from "../helpers/codex-cli-fixture-root";
 import { expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, toNamespacedPath } from "node:path";
 import { hardenSecretDirAsync } from "../../src/lib/windows-secret-acl";
 import { helperPath } from "../helpers/repo-root";
 import { trackBackgroundWork } from "../../src/lib/background-work";
@@ -19,13 +19,42 @@ import * as recovery from "../../src/codex/cli-update-recovery";
 import { codexCliUpdateSelectionGate, createCodexCliUpdateFence, allocateCodexCliUpdateGateOwner,
   createWorkerCommitWindow, beginCodexCliSelectionParentWrite, resetCodexCliSelectionGatesForTests,
   type CodexCliSelectionParentWrite } from "../../src/codex/cli-update-selection-gate";
+import { observeWindowsInstall } from "../../src/codex/cli-update-windows-observation";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const native = process.platform === "win32" && process.arch === "x64" ? test : test.skip;
+for (const kind of ["recovery", "pending", "readback"] as const) native(`Windows ${kind} publication hardens canonical paths beyond MAX_PATH`, async () => {
+  const root = createCodexCliTestRoot("ocx-long-store-");
+  await hardenSecretDirAsync(root, { required: true }); trustWindowsTempFixtureAncestry(root);
+  let parent = root;
+  const minimum = kind === "pending" ? 205 : 270;
+  while (parent.length < minimum) {
+    parent = join(parent, "c".repeat(Math.min(60, minimum - parent.length))); mkdirSync(parent);
+    await hardenSecretDirAsync(toNamespacedPath(parent), { required: true });
+  }
+  const config = join(parent, "config");
+  expect(config.length).toBeGreaterThan(kind === "pending" ? 200 : 260);
+  try {
+    if (kind === "readback") {
+      mkdirSync(config); await hardenSecretDirAsync(toNamespacedPath(config), { required: true });
+      writeFileSync(join(config, "fixture.txt"), "owned fixture");
+      expect((await observeWindowsInstall(config)).files).toMatchObject([{ relativePath: "fixture.txt", size: 13 }]);
+    } else {
+      mkdirSync(config); await hardenSecretDirAsync(toNamespacedPath(config), { required: true });
+      const token = crypto.randomUUID(), owner = recovery.createCodexCliUpdateRecovery(token, config);
+      owner.arm(); expect(recovery.codexCliUpdateRecoveryBlocksAdmission(config)).toBe(true);
+      recovery.finishClosedCodexCliUpdateRecovery(token, config);
+      expect(recovery.codexCliUpdateRecoveryBlocksAdmission(config)).toBe(false);
+      expect(readdirSync(join(config, "codex-cli-update-recovery"))).toContain(token + ".terminal");
+    }
+    expect(realpathSync.native(config)).toBe(config);
+  } finally { removeTreeWithRetry(root); }
+}, 60000);
 async function until(check: () => boolean, deadline = Date.now() + 30000) {
   while (!check()) { if (Date.now() >= deadline) throw new Error("fixture_handshake_timeout"); await Bun.sleep(10); }
 }
 native("normal guardian settlement isolates profile/cache writes and joins before staging cleanup", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-guardian-profile-"));
+  const root = createCodexCliTestRoot("ocx-guardian-profile-");
   await hardenSecretDirAsync(root, { required: true }); trustWindowsTempFixtureAncestry(root);
   const f = await prepareRetentionFixture(root); mkdirSync(f.configDir);
   const before = process.env.OPENCODEX_HOME; process.env.OPENCODEX_HOME = f.configDir;
@@ -67,7 +96,7 @@ native("normal guardian settlement isolates profile/cache writes and joins befor
   }
 }, 90000);
 native("a terminal version child with an unconfirmed guardian keeps the bounded reap result", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-guardian-reap-"));
+  const root = createCodexCliTestRoot("ocx-guardian-reap-");
   const child = startWindowsCliChild({ executable: process.execPath, args: ["-e", "process.exit(0)"],
     cwd: root, env: { SystemRoot: process.env.SystemRoot, TEMP: root, TMP: root }, policy: "version" });
   await until(() => child.observe().terminal);
@@ -80,7 +109,7 @@ native("a terminal version child with an unconfirmed guardian keeps the bounded 
   expect(await child.wait()).toMatchObject({ terminal: true, cleanupComplete: true });
 }, 15000);
 native("Windows durable uncertainty fences a fresh gate before native creation", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-pre-spawn-arm-")), config = join(root, "config");
+  const root = createCodexCliTestRoot("ocx-pre-spawn-arm-"), config = join(root, "config");
   await hardenSecretDirAsync(root, { required: true }); mkdirSync(config);
   await hardenSecretDirAsync(config, { required: true }); trustWindowsTempFixtureAncestry(root);
   const token = crypto.randomUUID(), before = process.env.OPENCODEX_HOME;
@@ -101,7 +130,7 @@ native("Windows durable uncertainty fences a fresh gate before native creation",
   }
 }, 60000);
 for (const during of ["arm", "publication"] as const) native(`Windows close cannot use a previous child's proof during ${during}`, async () => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-proof-generation-")), configDir = join(root, "config");
+  const root = createCodexCliTestRoot("ocx-proof-generation-"), configDir = join(root, "config");
   await hardenSecretDirAsync(root, { required: true }); mkdirSync(configDir);
   await hardenSecretDirAsync(configDir, { required: true }); trustWindowsTempFixtureAncestry(root);
   resetCodexCliSelectionGatesForTests();
@@ -127,7 +156,7 @@ for (const during of ["arm", "publication"] as const) native(`Windows close cann
   } finally { staleProof.mockRestore(); window.exit(); resetCodexCliSelectionGatesForTests(); }
 }, 60000);
 for (const acquired of [true, false]) native(`Windows apply seals close before a late ${acquired ? "commit" : "acquisition"}`, async () => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-windows-close-"));
+  const root = createCodexCliTestRoot("ocx-windows-close-");
   await hardenSecretDirAsync(root, { required: true }); trustWindowsTempFixtureAncestry(root);
   const f = await prepareRetentionFixture(root); mkdirSync(f.configDir);
   const previous = process.env.OPENCODEX_HOME; process.env.OPENCODEX_HOME = f.configDir;
@@ -162,7 +191,7 @@ for (const acquired of [true, false]) native(`Windows apply seals close before a
   }
 }, 60000);
 for (const descendant of [false, true]) native(`restarted Windows admission fences the surviving native ${descendant ? "descendant" : "installer"} Job, including home aliases`, async () => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-windows-restart-"));
+  const root = createCodexCliTestRoot("ocx-windows-restart-");
   await hardenSecretDirAsync(root, { required: true });
   const config = join(root, "config"), alias = join(root, "home-alias");
   const helper = helperPath("windows-cli-restart-recovery.ts");

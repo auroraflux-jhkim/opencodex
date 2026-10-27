@@ -1,7 +1,7 @@
-import { tmpdir } from "node:os";
+import { createCodexCliTestRoot } from "./codex-cli-fixture-root";
 import { trustWindowsTempFixtureAncestry } from "./windows-temp-ancestry";
 /** Private A1/A2 driver. No installer, provider or production request DTO seam. */
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, parse } from "node:path";
 import { dlopen, ptr } from "bun:ffi";
 import type { Library } from "bun:ffi";
@@ -85,7 +85,7 @@ function restoreInstrumentation() {
   owned.context.pins.release = owned.release;
 }
 async function prepareFixture() {
-  owned.root = mkdtempSync(join(tmpdir(), "ocx-native-acquire-"));
+  owned.root = createCodexCliTestRoot("ocx-native-acquire-");
   emit("started", { fixtureRoot: owned.root, name: NATIVE_ACQUISITION_CASES[owned.ids!.caseId] });
   await hardenSecretDirAsync(owned.root, { required: true });
   trustWindowsTempFixtureAncestry(owned.root);

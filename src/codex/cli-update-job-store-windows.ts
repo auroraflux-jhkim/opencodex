@@ -56,7 +56,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve, toNamespacedPath } from "node:path";
 import type { Library, Symbols } from "bun:ffi";
 import * as recoveryFfi from "bun:ffi";
 import { getConfigDir } from "../config/paths";
@@ -69,7 +69,6 @@ import {
   CODEX_CLI_JOB_STORE_MAX_BYTES, CodexCliJobStoreBusyError,
 } from "./cli-update-job-execution";
 import { windowsCanonicalPathMatches } from "./windows-installation-files";
-import { toNamespacedPath } from "node:path";
 
 const KERNEL_SYMBOLS = {
   GetDriveTypeW: { args: ["ptr"], returns: "u32" },
@@ -392,7 +391,8 @@ async function verifyAcl(entries: readonly WindowsAclEntry[]): Promise<void> {
   if (!await verifyWindowsEntriesAclAsync(aclTargets(entries), ACL_VERIFY_TIMEOUT_MS)) throw unsafe();
 }
 
-// External descriptor readers need extended-length targets for long paths.
+// External ACL tools need extended-length names even though native pins and
+// canonical/alias checks continue to use the original normalized long DOS paths.
 function aclTargets(entries: readonly WindowsAclEntry[]): WindowsAclEntry[] {
   return entries.map(entry => ({ ...entry, path: toNamespacedPath(entry.path) }));
 }
@@ -691,7 +691,7 @@ export function withWindowsCliRecoveryStore<T>(config: string, create: boolean, 
   const nt = recoveryFfi.dlopen("ntdll.dll", NT_SYMBOLS);
   const ctx: Ctx = { ffi: recoveryFfi, kernel, nt, pins: new PinSet() };
   const verify = (entries: readonly WindowsAclEntry[]) => {
-    if (!verifyWindowsEntriesAcl(entries, ACL_VERIFY_TIMEOUT_MS)) throw unsafe();
+    if (!verifyWindowsEntriesAcl(aclTargets(entries), ACL_VERIFY_TIMEOUT_MS)) throw unsafe();
   };
   try {
     const chain = pinChain(ctx, config, ACCESS_DIR_PIN);
@@ -701,7 +701,7 @@ export function withWindowsCliRecoveryStore<T>(config: string, create: boolean, 
     if (!configPin) throw unsafe();
     const dir = join(config, "codex-cli-update-recovery");
     try {
-      if (create) { mkdirSync(dir); hardenSecretDir(dir, { required: true }); }
+      if (create) { mkdirSync(dir); hardenSecretDir(toNamespacedPath(dir), { required: true }); }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     const directoryPin = relOpen(ctx, configPin.handle, "codex-cli-update-recovery", true,
       create ? ACCESS_DIR_PIN : ACCESS_READ, SHARE_DIR);
@@ -739,7 +739,7 @@ export function withWindowsCliRecoveryStore<T>(config: string, create: boolean, 
         const temp = join(dir, pendingName), destination = join(dir, name);
         const fd = openSync(temp, "wx", 0o600);
         try { writeFileSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
-        hardenSecretPath(temp, { required: true });
+        hardenSecretPath(toNamespacedPath(temp), { required: true });
         const file = leaf(pendingName, ACCESS_LEAF, SHARE_LEAF);
         try {
           if (!readAll(ctx, file.handle, file.stat.size).equals(Buffer.from(body))) throw unsafe();
@@ -748,7 +748,7 @@ export function withWindowsCliRecoveryStore<T>(config: string, create: boolean, 
           try { if (!sameIdentity(file.stat, published.stat)) throw unsafe(); }
           finally { ctx.pins.release(published.handle, kernel); }
           flushDir(ctx, directoryPin);
-        } finally { ctx.pins.release(file.handle, kernel); forgetEphemeralSecretPath(temp); }
+        } finally { ctx.pins.release(file.handle, kernel); forgetEphemeralSecretPath(toNamespacedPath(temp)); }
       },
     });
   } finally { ctx.pins.closeAll(kernel); nt.close(); kernel.close(); }
@@ -823,7 +823,7 @@ export async function openWindowsCliApplyAuthority(prefix: string, acquire: bool
         mkdirSync(path);
         const handle = relOpen(ctx, held.dir, "stage", true, ACCESS_READ, SHARE_DIR);
         stage = { path, handle, identity: inspect(ctx, handle, true) };
-        await hardenSecretDirAsync(path, { required: true });
+        await hardenSecretDirAsync(toNamespacedPath(path), { required: true });
         await verifyAcl([{ path, directory: true, policy: "private" }]);
         if (closed) throw unsafe();
         return path;

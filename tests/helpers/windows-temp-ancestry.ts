@@ -1,20 +1,23 @@
 import { spyOn } from "bun:test";
 import { dirname, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as acl from "../../src/lib/windows-owner-acl";
 
 const roots = new Map<string, string>();
 const verify = acl.verifyWindowsEntriesAclAsync;
 const verifySync = acl.verifyWindowsEntriesAcl;
+// Update-store ACL tools accept extended DOS names; fixture matching stays on
+// canonical DOS ancestry. This does not resolve a junction or an 8.3 alias.
+const fixturePath = (path: string) => resolve(path.startsWith("\\\\?\\") ? path.slice(4) : path);
 let installed = false;
 /** Inject only the ancestry ABOVE an explicitly hardened OS-temp fixture.
  * Native pins and all ACL policies at/below the fixture remain production checks.
  * Never changes the host TEMP/profile ACLs or approves an untrusted fixture leaf.
  */
 export function trustWindowsTempFixtureAncestry(root: string, temporaryRoot = tmpdir()): void {
-  const path = resolve(root), within = relative(resolve(temporaryRoot), path);
+  const path = realpathSync.native(root), within = relative(realpathSync.native(temporaryRoot), path);
   if (!within || within.startsWith("..") || within.includes(":")) throw new Error("fixture_outside_os_temp");
   roots.set(path.toLowerCase(), path);
   if (installed) return;
@@ -24,7 +27,7 @@ export function trustWindowsTempFixtureAncestry(root: string, temporaryRoot = tm
     // an entire npm tree on every ACL batch in a long multi-file test process.
     let anchor: string | undefined;
     for (const entry of entries) {
-      let current = resolve(entry.path);
+      let current = fixturePath(entry.path);
       for (;;) {
         anchor = roots.get(current.toLowerCase()); if (anchor) break;
         const parent = dirname(current); if (parent === current) break; current = parent;
@@ -32,7 +35,7 @@ export function trustWindowsTempFixtureAncestry(root: string, temporaryRoot = tm
       if (anchor) break;
     }
     return entries.map(entry => anchor && entry.policy === "trusted-ancestry"
-      && (anchor + sep).toLowerCase().startsWith((resolve(entry.path) + sep).toLowerCase())
+      && (anchor + sep).toLowerCase().startsWith((fixturePath(entry.path) + sep).toLowerCase())
       ? { ...entry, path: anchor } : entry);
   };
   spyOn(acl, "verifyWindowsEntriesAclAsync").mockImplementation((entries, timeout) => verify(mapped(entries), timeout));
@@ -40,7 +43,7 @@ export function trustWindowsTempFixtureAncestry(root: string, temporaryRoot = tm
 }
 export function windowsTempAncestryPreload(root: string): string {
   trustWindowsTempFixtureAncestry(root); // Validate against the parent's actual OS-temp root.
-  const temporaryRoot = tmpdir(); // A nested bun:test preload creates another TEMP sandbox.
+  const temporaryRoot = realpathSync.native(tmpdir()); // A nested bun:test preload creates another TEMP sandbox.
   const path = join(root, "fixture-ancestry-preload.ts");
   writeFileSync(path, `import { trustWindowsTempFixtureAncestry } from ${JSON.stringify(import.meta.path)};
     trustWindowsTempFixtureAncestry(${JSON.stringify(root)},${JSON.stringify(temporaryRoot)});

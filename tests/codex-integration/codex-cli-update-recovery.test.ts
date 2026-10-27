@@ -2,8 +2,7 @@ import { createCodexCliTestRoot } from "../helpers/codex-cli-fixture-root";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { verifyInstalledCodexVersion } from "../../src/codex/cli-update-apply";
 import { runCodexCliUpdateApplyInWorker } from "../../src/codex/cli-update-job-worker";
@@ -75,7 +74,7 @@ test.each([
 });
 
 test("precommit recovery atomically prevents a late commit during publication", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-precommit-publication-")), configDir = join(root, "config");
+  const root = createCodexCliTestRoot("ocx-precommit-publication-"), configDir = join(root, "config");
   mkdirSync(configDir, { mode: 0o700 });
   if (process.platform === "win32") {
     await hardenSecretDirAsync(root, { required: true }); await hardenSecretDirAsync(configDir, { required: true });
@@ -170,7 +169,7 @@ test("late verifier close after reap uncertainty releases only its admission own
 });
 
 test.each([false, true])("worker close recovers precommit only (committed=%s)", async committed => {
-  const root = mkdtempSync(join(tmpdir(), "ocx-worker-close-")), configDir = join(root, "config");
+  const root = createCodexCliTestRoot("ocx-worker-close-"), configDir = join(root, "config");
   mkdirSync(configDir, { mode: 0o700 });
   if (process.platform === "win32") {
     await hardenSecretDirAsync(root, { required: true }); await hardenSecretDirAsync(configDir, { required: true });

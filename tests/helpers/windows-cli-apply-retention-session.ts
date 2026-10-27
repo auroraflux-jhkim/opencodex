@@ -1,8 +1,9 @@
 /** Explicitly invoked private harness. No top-level execution or bun:test teardown. */
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
-import { join, relative, isAbsolute, resolve } from "node:path";
+import { mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { join, relative, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
+import { createCodexCliTestRoot } from "./codex-cli-fixture-root";
 import { trustWindowsTempFixtureAncestry, windowsTempAncestryPreload } from "./windows-temp-ancestry";
 import { hardenSecretDirAsync } from "../../src/lib/windows-secret-acl";
 import { admitCodexCliUpdateJob, readCodexCliUpdateJob, runCodexCliUpdateJob } from "../../src/codex/cli-update-job";
@@ -28,10 +29,10 @@ export function createActualApplyRetentionSession(options: {
   need(options.executionAuthorized === true && options.sourceVerified === ACTUAL_APPLY_SOURCE, "SOURCE_AND_EXECUTION_ADMISSION_REQUIRED");
   need(process.platform === "win32" && process.arch === "x64" && Bun.version === "1.4.4"
     && createHash("sha256").update(readFileSync(process.execPath)).digest("hex").toUpperCase() === OFFICIAL_BUN, "OFFICIAL_RUNTIME_REQUIRED");
-  const temporaryRoot = resolve(options.fixtureVolumeRoot), within = relative(resolve(tmpdir()), temporaryRoot);
+  const temporaryRoot = realpathSync.native(options.fixtureVolumeRoot), within = relative(realpathSync.native(tmpdir()), temporaryRoot);
   need(!within.startsWith("..") && !isAbsolute(within), "OS_TEMP_ANCHOR_REQUIRED");
   need(["close-within-grace", "close-after-ledger-fallback"].includes(options.caseId), "EXACT_CASE_REQUIRED");
-  const root = mkdtempSync(join(temporaryRoot, "ocx-actual-apply-"));
+  const root = createCodexCliTestRoot("ocx-actual-apply-", temporaryRoot);
   const nonce = randomUUID(), configDir = join(root, "config"), began = performance.now();
   const state = { root, configDir, caseId: options.caseId, source: ACTUAL_APPLY_SOURCE,
     status: "PREPARED", failure: null as string | null, workerClosed: false, cleanupProven: false,
