@@ -14,7 +14,8 @@ import { runPassiveRead } from "../../src/lib/passive-read";
 import { atomicWriteFileNoFollow } from "../../src/config/atomic-write";
 import { join } from "node:path";
 import { hardenSecretPath, hardenSecretPathAsync, resetHardenedStateForTests, setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests, verifySecretPathAcl } from "../../src/lib/windows-secret-acl";
-import { verifyWindowsPrivateEntriesAsync } from "../../src/lib/windows-owner-acl";
+import { setWindowsOwnerAclRunnerForTests, verifyWindowsPrivateEntries, verifyWindowsPrivateEntriesAsync, windowsPrivateEntriesAclMatches } from "../../src/lib/windows-owner-acl";
+import { resetWindowsPrincipalForTests, setWindowsPrincipalRunnerForTests } from "../../src/lib/windows-user-principal";
 
 test("retired OpenCode Free entries warn once on load and an unrelated save persists their removal", () => {
   const home = createTempHome("ocx-removed-provider-");
@@ -261,6 +262,81 @@ test.skipIf(process.platform !== "win32")("explicit SYSTEM and Administrators gr
   }
 });
 
+test.skipIf(process.platform !== "win32")("a single-ACE unprotected recovery is preserved and gets a protected sibling", () => {
+  withLegacyConfig({}, bytes => {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    writeFileSync(backup, bytes);
+    // A non-inheritable parent ACE keeps the file at exactly one explicit ACE.
+    const script = String.raw`
+      $ErrorActionPreference='Stop'
+      $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+      $parent=[Environment]::GetEnvironmentVariable('OCX_TEST_ACL_PARENT')
+      $file=[Environment]::GetEnvironmentVariable('OCX_TEST_ACL_FILE')
+      $d=[Security.AccessControl.DirectorySecurity]::new()
+      $d.SetOwner($sid)
+      $d.SetAccessRuleProtection($true,$false)
+      $d.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'))
+      [IO.Directory]::SetAccessControl($parent,$d)
+      $f=[Security.AccessControl.FileSecurity]::new()
+      $f.SetOwner($sid)
+      $f.SetAccessRuleProtection($false,$false)
+      $f.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'))
+      [IO.File]::SetAccessControl($file,$f)
+      $read=[Security.AccessControl.FileSecurity]::new($file,[Security.AccessControl.AccessControlSections]'Owner,Group,Access')
+      [Console]::WriteLine(('protected={0};aceCount={1}' -f $read.AreAccessRulesProtected,$read.Access.Count))
+    `;
+    const ps = join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe");
+    const setup = Bun.spawnSync([ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      env: { ...process.env, OCX_TEST_ACL_PARENT: process.env.OPENCODEX_HOME!, OCX_TEST_ACL_FILE: backup },
+      timeout: 5_000, windowsHide: true,
+    });
+    expect(setup.exitCode).toBe(0);
+    expect(setup.stdout.toString().trim()).toBe("protected=False;aceCount=1");
+    const icacls = join(process.env.SystemRoot!, "System32/icacls.exe");
+    const before = Bun.spawnSync([icacls, backup]);
+    expect(before.exitCode).toBe(0);
+    expect(verifyWindowsPrivateEntries([{ path: backup, directory: false }], 5_000)).toBe(false);
+    loadConfig();
+    const copies = readdirSync(process.env.OPENCODEX_HOME!).filter(name => name.endsWith(".bak"));
+    expect(copies).toHaveLength(2);
+    expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
+    expect(Bun.spawnSync([icacls, backup]).stdout).toEqual(before.stdout);
+    expect(verifySecretPathAcl(backup)).toBe(false);
+    expect(verifyWindowsPrivateEntries([{ path: backup, directory: false }], 5_000)).toBe(false);
+    const sibling = join(process.env.OPENCODEX_HOME!, copies.find(name => name !== "config.json.pre-opencode-free-removal.bak")!);
+    expect(readFileSync(sibling)).toEqual(Buffer.from(bytes));
+    expect(verifyWindowsPrivateEntries([{ path: sibling, directory: false }], 5_000)).toBe(true);
+  });
+});
+
+test.skipIf(process.platform !== "win32")("recovery verifier rejects a disallowed owner behind one user Full Control ACE", () => {
+  const user = "S-1-5-21-111-222-333-1001";
+  const name = "EXAMPLE\\Owner";
+  const target = "synthetic-recovery.bak";
+  const entries = [{ path: target, directory: false }];
+  resetWindowsPrincipalForTests();
+  setWindowsPrincipalRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: `${user}\n${name}\n` }));
+  setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: `${target} ${name}:(F)\r\n` }));
+  try {
+    // The same production parser seam covers owners without requiring Windows elevation in CI.
+    for (const owner of ["S-1-5-32-544", "S-1-5-32-545", "S-1-5-21-111-222-333-1002"]) {
+      const stdout = `U|${user}|${user}|False\nE|0|${owner}|4100|1\nA|0|0|0|2032127|${user}|False\nEND\n`;
+      expect(windowsPrivateEntriesAclMatches(stdout, entries)).toBe(false);
+      setWindowsOwnerAclRunnerForTests(() => ({ success: true, timedOut: false, stdout }));
+      expect(verifySecretPathAcl(target)).toBe(false);
+    }
+    const stdout = `U|${user}|${user}|False\nE|0|${user}|4100|1\nA|0|0|0|2032127|${user}|False\nEND\n`;
+    setWindowsOwnerAclRunnerForTests(() => ({ success: true, timedOut: false, stdout }));
+    expect(verifySecretPathAcl(target)).toBe(true);
+  } finally {
+    setWindowsOwnerAclRunnerForTests(null);
+    setWindowsPrincipalRunnerForTests(null);
+    setIcaclsRunnerForTests(null);
+    resetWindowsPrincipalForTests();
+    resetHardenedStateForTests();
+  }
+});
+
 function recoveryProtection(path: string): string | number {
   if (process.platform !== "win32") {
     const entry = statSync(path);
@@ -309,23 +385,31 @@ test.each(["compliant", "broad", "unverifiable"])("recovery reuse checks the exi
       import { setWindowsPrincipalRunnerForTests } from ${JSON.stringify(module("src/lib/windows-user-principal.ts"))};
       import { preserveRemovedOpenCodeFree } from ${JSON.stringify(module("src/config/removed-opencode-free-backup.ts"))};
       setPlatformForTests('win32');
-      setWindowsOwnerAclRunnerForTests(() => ({ success: false, timedOut: false, stdout: '' }));
       setWindowsPrincipalRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: 'S-1-5-21-9-9-9-1001\\r\\nTESTHOST\\\\tester' }));
-      const commands = [];
-      setIcaclsRunnerForTests(args => {
-        const existing = args[0] === ${JSON.stringify(backup)};
-        if (existing) commands.push(args);
+      const probes = [], commands = [];
+      setWindowsOwnerAclRunnerForTests((entries, timeoutMs) => {
+        probes.push({ entries, timeoutMs });
         const policy = ${JSON.stringify(policy)};
-        return { success: !(existing && policy === 'unverifiable'), exitCode: existing && policy === 'unverifiable' ? 1 : 0, timedOut: false,
-          stdout: args[0] + ' TESTHOST\\\\tester:(F)\\n' + (existing && policy === 'broad' ? '  Everyone:(R)\\n' : '') + '\\n' };
+        const user = 'S-1-5-21-9-9-9-1001';
+        const stdout = 'U|' + user + '|' + user + '|False\\nE|0|' + user + '|4100|' + (policy === 'broad' ? 2 : 1)
+          + '\\nA|0|0|0|2032127|' + user + '|False\\n' + (policy === 'broad' ? 'A|0|0|0|1179785|S-1-1-0|False\\n' : '') + 'END\\n';
+        return { success: policy !== 'unverifiable', timedOut: false, stdout };
+      });
+      setIcaclsRunnerForTests(args => {
+        if (args[0] === ${JSON.stringify(backup)}) commands.push(args);
+        return { success: true, exitCode: 0, timedOut: false, stdout: '' };
       });
       preserveRemovedOpenCodeFree(${JSON.stringify(getConfigPath())}, Buffer.from('original'));
-      console.log(JSON.stringify(commands));`;
+      console.log(JSON.stringify({ probes, commands }));`;
     const child = Bun.spawnSync([process.execPath, "--eval", script], { env: { ...process.env } });
     expect(child.exitCode).toBe(0);
-    const commands = JSON.parse(child.stdout.toString()) as string[][];
-    expect(commands.length).toBeGreaterThan(0);
-    expect(commands.every(args => args.length === 1 && args[0] === backup)).toBe(true);
+    const { probes, commands } = JSON.parse(child.stdout.toString()) as {
+      probes: { entries: { path: string; directory: boolean }[]; timeoutMs: number }[]; commands: string[][];
+    };
+    expect(probes.length).toBeGreaterThan(0);
+    expect(probes.every(probe => probe.entries.length === 1 && probe.entries[0]!.path === backup && !probe.entries[0]!.directory)).toBe(true);
+    expect(probes.every(probe => probe.timeoutMs > 0 && probe.timeoutMs <= 5_000)).toBe(true);
+    expect(commands).toEqual([]); // Reuse inspection never hardens the occupied recovery name.
     expect(readdirSync(home.root).filter(name => name.endsWith(".bak"))).toHaveLength(policy === "compliant" ? 1 : 2);
     expect(readFileSync(backup, "utf8")).toBe("original");
   } finally { home.remove(); }

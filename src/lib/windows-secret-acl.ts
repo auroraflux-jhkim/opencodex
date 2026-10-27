@@ -1002,8 +1002,8 @@ function shouldVerifyExistingAcl(): boolean {
   return env["OPENCODEX_ACL_VERIFY_EXISTING"] === "1";
 }
 
-function existingAclAlreadyCompliant(targetPath: string, directory: boolean, deadline: number, forceProbe = false): boolean {
-  if (!forceProbe && !shouldVerifyExistingAcl()) return false;
+function existingAclAlreadyCompliant(targetPath: string, directory: boolean, deadline: number): boolean {
+  if (!shouldVerifyExistingAcl()) return false;
   const identity = cachedCurrentWindowsIdentity();
   if (!identity) return false;
   try {
@@ -1017,14 +1017,10 @@ function existingAclAlreadyCompliant(targetPath: string, directory: boolean, dea
   }
 }
 
-/** Fresh secret ACL verification, including retained privileged ACEs; never harden or trust a memo. */
+/** Fresh owner/protected-DACL verification; never use the name-only shortcut, harden or trust a memo. */
 export function verifySecretPathAcl(targetPath: string): boolean {
   if (!windowsSecretAclApplies()) return false;
-  const deadline = nowFn() + resolveHardenDeadlineMs();
-  try {
-    currentWindowsPrincipal(deadline);
-    return existingAclAlreadyCompliant(targetPath, false, deadline, true);
-  } catch { return false; }
+  return verifyWindowsPrivateEntries([{ path: targetPath, directory: false }], resolveHardenDeadlineMs());
 }
 
 async function existingAclAlreadyCompliantAsync(
