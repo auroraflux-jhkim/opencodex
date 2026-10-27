@@ -297,7 +297,7 @@ async function heldEgress(dialUpstream?: Parameters<typeof startConnectProxy>[1]
     selectTunnel = options.selectTunnel;
     return proxy;
   };
-  return { port: proxy.port, startProxy };
+  return { port: proxy.port, startProxy, close: proxy.close };
 }
 
 const BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/2.7032.0";
@@ -774,10 +774,10 @@ describe("startClaudeIntercept wiring", () => {
   });
 
   test("a busy picker port leaves the applied profile for the next restart to retry", { timeout: 30_000 }, async () => {
-    // Keep the conflict owned across both starts. Successful listeners choose their
-    // own ports through the existing bind seam; no released number is reacquired.
-    const squatter = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("occupied") });
-    const pickerPort = squatter.port;
+    // Keep the real egress relay bound: the first start conflicts with it, and the
+    // retry adopts it at the persisted URL without reacquiring a released port.
+    const egress = await heldEgress();
+    const pickerPort = egress.port;
     const port = pickerPort - 1;
     let retry = false;
     try {
@@ -813,7 +813,9 @@ describe("startClaudeIntercept wiring", () => {
         pickerSecurity: trust.run,
         pickerCaStore: store, pickerPlatform: "darwin" as NodeJS.Platform,
         startProxy: (requested: number, options: Parameters<typeof startConnectProxy>[1]) =>
-          startConnectProxy(requested === pickerPort && !retry ? pickerPort : 0, options),
+          requested === pickerPort && retry
+            ? egress.startProxy(requested, options)
+            : startConnectProxy(requested === pickerPort ? pickerPort : 0, options),
       });
       let first;
       try {
@@ -827,12 +829,14 @@ describe("startClaudeIntercept wiring", () => {
       } finally {
         await first?.stop();
       }
-      // The next restart gets a fresh listener; the surviving selection restores in place.
+      // The next restart adopts the held relay; the surviving selection restores in place.
       retry = true;
       const second = await startClaudeIntercept(startOpts());
       try {
         expect(second?.pickerProxyPort).toBeGreaterThan(0);
+        expect(second?.pickerProxyPort).toBe(pickerPort);
         const restoredUrl = `http://127.0.0.1:${second!.pickerProxyPort}`;
+        expect(restoredUrl).toBe(original.proxyUrl);
         for (let i = 0; i < 1600; i += 1) {
           const current = inspectDesktopPickerProfile({ configDir: root, platform: "darwin" });
           if (current.kind === "applied" && current.proxyUrl === restoredUrl) break;
@@ -843,7 +847,7 @@ describe("startClaudeIntercept wiring", () => {
       } finally {
         await second?.stop();
       }
-    } finally { await squatter.stop(true); }
+    } finally { await egress.close(); }
   });
 
   test("only the app's browser tunnels on Desktop's egress proxy consult the picker", async () => {
