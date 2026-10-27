@@ -22,8 +22,7 @@ import { isMissingPathError } from "./atomic-write";
 import { getConfigDir, getConfigPath } from "./paths";
 import { getDefaultConfig } from "./proxy-env";
 import { salvageConfigCandidate } from "./salvage";
-import { sanitizeRemovedOpenCodeFreeForLoad } from "./removed-opencode-free";
-import { preserveRemovedOpenCodeFree } from "./removed-opencode-free-backup";
+import { projectRemovedOpenCodeFreeSnapshot } from "./removed-opencode-free-backup";
 import { sanitizeOpenCodeOverridesForLoad } from "./opencode-wire-upgrade";
 import {
   sanitizeReasoningPinsForLoad,
@@ -788,7 +787,7 @@ export function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
 function configDiagnosticsFromText(raw: string, file?: { path: string; bytes: Uint8Array }): ConfigDiagnostics {
   try {
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
-    if (sanitizeRemovedOpenCodeFreeForLoad(parsed) && file) preserveRemovedOpenCodeFree(file.path, file.bytes);
+    projectRemovedOpenCodeFreeSnapshot(parsed, file);
     sanitizeOpenCodeOverridesForLoad(parsed);
     sanitizeReasoningPinsForLoad(parsed);
     // Same degradation as loadConfig: a hand-edited invalid retryOn429 must not trip the

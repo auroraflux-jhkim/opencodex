@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { armClaudeCodeBaseline, getConfigPath, getDefaultConfig, loadConfig, mutatePersistedConfig, saveConfigPreservingClaudeCode } from "../../src/config";
 import { configDiagnosticsFromRaw, readConfigAdmissionSnapshot, readConfigDiagnostics } from "../../src/config/diagnostics";
@@ -10,6 +10,7 @@ import { planVisionSidecar, shouldResolveOpenAiVisionSidecar } from "../../src/v
 import { planWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../src/web-search";
 import { createTempHome } from "../helpers/temp-home";
 import { repoPath } from "../helpers/repo-root";
+import { runPassiveRead } from "../../src/lib/passive-read";
 
 test("retired OpenCode Free entries warn once on load and an unrelated save persists their removal", () => {
   const home = createTempHome("ocx-removed-provider-");
@@ -84,7 +85,8 @@ test("retired OpenCode Free entries warn once on load and an unrelated save pers
     const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
     expect(existsSync(backup)).toBe(true);
     expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
-    expect(warnings[0]![0]).toContain(`the original file was saved to ${backup}`);
+    expect(warnings[0]![0]).toContain("the original file was saved to");
+    expect(warnings[0]![0]).toContain("config.json.pre-opencode-free-removal.bak");
     expect(warnings[0]![0]).toContain("restore by copying it back over config.json");
     // A later retired config must retain the first recovery point, even after another save.
     writeFileSync(getConfigPath(), bytes + "\n");
@@ -144,14 +146,16 @@ test("a failed recovery copy warns without exposing paths or secret bytes", () =
   const home = createTempHome("ocx-failed-retirement-backup-");
   try {
     const path = getConfigPath();
-    mkdirSync(`${path}.pre-opencode-free-removal.bak`);
     const module = pathToFileURL(repoPath("src/config/removed-opencode-free-backup.ts")).href;
-    const script = `import { preserveRemovedOpenCodeFree } from ${JSON.stringify(module)};
+    const script = `import { mock } from 'bun:test'; import * as fs from 'node:fs';
+      const real = { ...fs }; mock.module('node:fs', () => ({ ...real, linkSync() { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } }));
+      const { preserveRemovedOpenCodeFree } = await import(${JSON.stringify(module)});
       preserveRemovedOpenCodeFree(${JSON.stringify(path)}, Buffer.from("synthetic-secret-must-not-be-logged"));`;
     const child = Bun.spawnSync([process.execPath, "--eval", script], { env: { ...process.env } });
     expect(child.exitCode).toBe(0);
     const output = child.stdout.toString() + child.stderr.toString();
     expect(output).toContain("copy config.json now if you need the old entry");
+    expect(output).toContain("no recovery copy was made");
     expect(output).not.toContain("the original file was saved to");
     expect(output).not.toContain(path);
     expect(output).not.toContain("synthetic-secret-must-not-be-logged");
@@ -174,6 +178,101 @@ function withLegacyConfig(patch: Record<string, unknown>, check: (bytes: string)
     check(bytes);
   } finally { warn.mockRestore(); home.remove(); }
 }
+
+test.each(["file", "directory"])("an unrelated %s at the recovery name gets an exclusive sibling", kind => {
+  withLegacyConfig({}, bytes => {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    if (kind === "file") writeFileSync(backup, "unrelated occupant");
+    else mkdirSync(backup);
+    loadConfig();
+    readConfigDiagnostics();
+    const siblings = readdirSync(process.env.OPENCODEX_HOME!).filter(name => /\.pre-opencode-free-removal\..+\.bak$/.test(name));
+    expect(siblings).toHaveLength(1);
+    expect(readFileSync(`${process.env.OPENCODEX_HOME}/${siblings[0]}`)).toEqual(Buffer.from(bytes));
+    if (kind === "file") expect(readFileSync(backup, "utf8")).toBe("unrelated occupant");
+    else expect(statSync(backup).isDirectory()).toBe(true);
+  });
+});
+
+test("an identical original recovery copy is reused without another sibling", () => {
+  withLegacyConfig({}, bytes => {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    writeFileSync(backup, bytes);
+    loadConfig();
+    expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
+    expect(readdirSync(process.env.OPENCODEX_HOME!).filter(name => name.endsWith(".bak"))).toHaveLength(1);
+  });
+});
+
+test("late retired disk edits are preserved byte for byte by live saves", () => {
+  const home = createTempHome("ocx-late-retired-");
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    writeFileSync(getConfigPath(), JSON.stringify(getDefaultConfig()));
+    const live = loadConfig();
+    armClaudeCodeBaseline(live);
+    const raw = Buffer.from("\uFEFF" + JSON.stringify({ ...getDefaultConfig(), providers: {
+      "opencode-free": { apiKey: "synthetic-late-key", baseUrl: "https://example.test/v1" },
+    } }) + "\r\n");
+    writeFileSync(getConfigPath(), raw);
+    live.port = 10101;
+    saveConfigPreservingClaudeCode(live);
+    expect(JSON.parse(readFileSync(getConfigPath(), "utf8")).providers["opencode-free"]).toBeUndefined();
+    expect(readFileSync(`${getConfigPath()}.pre-opencode-free-removal.bak`)).toEqual(raw);
+  } finally { warn.mockRestore(); home.remove(); }
+});
+
+test.each(["loader", "diagnostics", "admission"])("passive %s projects retired data without files or notices", async reader => {
+  const home = createTempHome("ocx-passive-retired-");
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    writeFileSync(getConfigPath(), JSON.stringify({ ...getDefaultConfig(), defaultProvider: "openai", providers: { ...getDefaultConfig().providers, "opencode-free": {} } }));
+    const before = readdirSync(home.root);
+    const metadata = statSync(getConfigPath(), { bigint: true });
+    await runPassiveRead(async () => {
+      const config = reader === "loader" ? loadConfig() : reader === "diagnostics" ? readConfigDiagnostics().config : readConfigAdmissionSnapshot().diagnostics.config;
+      expect(config.providers["opencode-free"]).toBeUndefined();
+    });
+    expect(readdirSync(home.root)).toEqual(before);
+    expect(statSync(getConfigPath(), { bigint: true }).ctimeNs).toBe(metadata.ctimeNs);
+    expect(warn.mock.calls).toHaveLength(0);
+  } finally { warn.mockRestore(); home.remove(); }
+});
+
+test("successful recovery notices redact a secret-shaped home and retain the filename", () => {
+  const home = createTempHome("ocx-sk-syntheticOnly7800-");
+  try {
+    const module = pathToFileURL(repoPath("src/config/removed-opencode-free-backup.ts")).href;
+    const child = Bun.spawnSync([process.execPath, "--eval", `import { preserveRemovedOpenCodeFree } from ${JSON.stringify(module)};
+      preserveRemovedOpenCodeFree(${JSON.stringify(getConfigPath())}, Buffer.from("synthetic-original"));`], { env: { ...process.env } });
+    expect(child.exitCode).toBe(0);
+    const output = child.stderr.toString();
+    expect(output).toContain("config.json.pre-opencode-free-removal.bak");
+    expect(output).not.toContain("sk-syntheticOnly7800");
+  } finally { home.remove(); }
+});
+
+test("a substituted empty recovery temp never receives original secret bytes", () => {
+  const home = createTempHome("ocx-recovery-substitution-");
+  try {
+    const module = pathToFileURL(repoPath("src/config/removed-opencode-free-backup.ts")).href;
+    const script = `import { mock } from 'bun:test'; import * as fs from 'node:fs';
+      const real = { ...fs }; let stolen;
+      mock.module('node:fs', () => ({ ...real, openSync(path, flags, mode) {
+        const fd = real.openSync(path, flags, mode);
+        if (!stolen && flags === 'wx') {
+          stolen = path + '.stolen'; real.renameSync(path, stolen); real.writeFileSync(path, 'replacement');
+        } return fd;
+      }}));
+      const { preserveRemovedOpenCodeFree } = await import(${JSON.stringify(module)});
+      preserveRemovedOpenCodeFree(${JSON.stringify(getConfigPath())}, Buffer.from('SYNTHETIC-7800-SECRET'));
+      console.log(JSON.stringify({ swapped: !!stolen, leaked: !!stolen && real.readFileSync(stolen).includes(Buffer.from('SYNTHETIC-7800-SECRET')) }));`;
+    const child = Bun.spawnSync([process.execPath, "--eval", script], { env: { ...process.env } });
+    expect(child.exitCode).toBe(0);
+    expect(JSON.parse(child.stdout.toString())).toEqual({ swapped: true, leaked: false });
+    expect(child.stderr.toString()).toContain("copy config.json now");
+  } finally { home.remove(); }
+});
 
 test("retired desktop assignments repair defaults without losing healthy profile state", () => {
   const desktopProfile = {

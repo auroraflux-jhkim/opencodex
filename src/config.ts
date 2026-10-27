@@ -162,8 +162,7 @@ import { withConfigMutationLockSync, bumpGenerationForCooperatingConfigWrite } f
 import { getDefaultConfig } from "./config/proxy-env";
 import { configSchema } from "./config/schema/config-schema";
 import { sanitizeOpenCodeOverridesForLoad } from "./config/opencode-wire-upgrade";
-import { sanitizeRemovedOpenCodeFreeForLoad } from "./config/removed-opencode-free";
-import { preserveRemovedOpenCodeFree } from "./config/removed-opencode-free-backup";
+import { projectRemovedOpenCodeFreeSnapshot } from "./config/removed-opencode-free-backup";
 import {
   hardenExistingSecret,
   normalizeApiKeyIds,
@@ -224,7 +223,7 @@ function loadConfigUnobserved(): OcxConfig {
   try {
     const bytes = readFileSync(configPath);
     const parsed = JSON.parse(bytes.toString("utf-8").replace(/^\uFEFF/, ""));
-    if (sanitizeRemovedOpenCodeFreeForLoad(parsed)) preserveRemovedOpenCodeFree(configPath, bytes);
+    projectRemovedOpenCodeFreeSnapshot(parsed, { path: configPath, bytes });
     sanitizeOpenCodeOverridesForLoad(parsed);
     sanitizeAliasesForLoad(parsed);
     sanitizeReasoningPinsForLoad(parsed);

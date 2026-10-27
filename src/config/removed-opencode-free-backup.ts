@@ -1,68 +1,81 @@
-import { chmodSync, closeSync, fchmodSync, ftruncateSync, linkSync, lstatSync, openSync, unlinkSync, writeFileSync } from "node:fs";
-import { nextAtomicTempSequence } from "./atomic-write";
-import { forgetEphemeralSecretPath, hardenSecretPath } from "../lib/windows-secret-acl";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { atomicWriteFileNoFollow } from "./atomic-write";
+import { isPassiveRead } from "../lib/passive-read";
+import { redactUserPath } from "../lib/redact";
+import { sanitizeRemovedOpenCodeFreeForLoad } from "./removed-opencode-free";
 
 let warned = false;
 
-function protectExistingBackup(path: string): void {
-  if (!lstatSync(path).isFile()) throw new Error("Recovery copy is not a regular file");
-  if (process.platform === "win32") hardenSecretPath(path, { required: true });
-  else chmodSync(path, 0o600);
+/** Inspect occupants without following links or modifying their permissions. */
+function holdsOriginal(path: string, original: Uint8Array): boolean {
+  let descriptor: number | undefined;
+  try {
+    const entry = lstatSync(path, { bigint: true });
+    if (!entry.isFile() || entry.nlink !== 1n || entry.dev === 0n || entry.ino === 0n) return false;
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino) return false;
+    const bytes = readFileSync(descriptor);
+    const after = lstatSync(path, { bigint: true });
+    return after.isFile() && after.dev === opened.dev && after.ino === opened.ino
+      && bytes.equals(Buffer.from(original));
+  } catch { return false; }
+  finally { if (descriptor !== undefined) { try { closeSync(descriptor); } catch { /* optional read only */ } } }
 }
 
-/** Publish the exact bytes read from disk without replacing the first recovery copy. */
+/** Keep each distinct disk original without overwriting an unrelated or older copy. */
 function backupOriginal(configPath: string, rawBytes: Uint8Array): string | null {
-  const backup = `${configPath}.pre-opencode-free-removal.bak`;
-  const temp = `${backup}.ocx.${process.pid}.${nextAtomicTempSequence()}.tmp`;
-  let descriptor: number | undefined;
-  let published = false;
+  const stem = `${configPath}.pre-opencode-free-removal`;
+  // A prior occupied-name read may already have preserved this exact snapshot.
   try {
+    for (const name of readdirSync(dirname(configPath))) {
+      if (name.startsWith(`${basename(stem)}.`) && name.endsWith(".bak")) {
+        const existing = join(dirname(configPath), name);
+        if (holdsOriginal(existing, rawBytes)) return existing;
+      }
+    }
+  } catch { /* publication below reports unreadable/unwritable homes */ }
+  const stamp = Date.now();
+  for (let n = 0; n < 100; n++) {
+    const backup = n === 0 ? `${stem}.bak` : `${stem}.${stamp}${n === 1 ? "" : `-${n}`}.bak`;
+    if (holdsOriginal(backup, rawBytes)) return backup;
+    let published = false;
     try {
-      protectExistingBackup(backup);
+      atomicWriteFileNoFollow(backup, rawBytes, undefined, { afterRename: () => { published = true; } }, { exclusive: true });
       return backup;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
-    }
-    descriptor = openSync(temp, "wx", 0o600);
-    // Like config.json writes, harden the empty file BEFORE it receives secrets.
-    if (process.platform === "win32") hardenSecretPath(temp, { required: true, timeoutMemoKey: backup });
-    else fchmodSync(descriptor, 0o600);
-    writeFileSync(descriptor, rawBytes);
-    try {
-      linkSync(temp, backup);
-      published = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
-      protectExistingBackup(backup);
-    }
-    return backup;
-  } catch {
-    console.warn("Could not preserve the original config before OpenCode Free removal.");
-    return null;
-  } finally {
-    if (descriptor !== undefined) {
-      // A published hard link shares its bytes with temp: never truncate that inode.
-      if (!published) {
-        try { ftruncateSync(descriptor, 0); } catch { /* still attempt removal */ }
-      }
-      try { closeSync(descriptor); } catch { /* still attempt removal */ }
-      try {
-        unlinkSync(temp);
-        forgetEphemeralSecretPath(temp);
-      } catch {
+      if (published) {
         console.warn("Could not remove an OpenCode Free recovery temporary file.");
+        return backup;
       }
+      if (holdsOriginal(backup, rawBytes)) return backup;
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+        continue;
+      }
+      // A directory occupant can report EACCES on Windows instead of EEXIST.
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== "EACCES" && code !== "EPERM") break;
+      try { if (!lstatSync(backup).isDirectory()) break; } catch { break; }
     }
   }
+  console.warn("Could not preserve the original config before OpenCode Free removal; no recovery copy was made. Copy config.json now.");
+  return null;
 }
 
-/** Disk-load boundary only; imported text and pure projections never create backups or notices. */
+/** Disk-load boundary only; imported text and passive reads never publish or notify. */
 export function preserveRemovedOpenCodeFree(configPath: string, rawBytes: Uint8Array): void {
+  if (isPassiveRead()) return;
   const backup = backupOriginal(configPath, rawBytes);
   if (warned) return;
   warned = true;
   const recovery = backup
-    ? `the original file was saved to ${backup} (restore by copying it back over config.json, for example after downgrading).`
-    : "copy config.json now if you need the old entry.";
+    ? `the original file was saved to ${redactUserPath(backup)} (restore by copying it back over config.json, for example after downgrading).`
+    : "no recovery copy was made; copy config.json now if you need the old entry.";
   console.warn(`opencode-free support was removed because every free model now returns 403 permission_denied under OpenCode's upstream free-tier gate (#7255); the entry and dependent references are disabled. The next configuration save removes them from config.json; ${recovery} Use opencode-go, or another provider such as opencode-zen or openrouter.`);
+}
+
+/** One snapshot boundary for the loader, diagnostics and authoritative live-save read. */
+export function projectRemovedOpenCodeFreeSnapshot(parsed: unknown, file?: { path: string; bytes: Uint8Array }): void {
+  if (sanitizeRemovedOpenCodeFreeForLoad(parsed) && file) preserveRemovedOpenCodeFree(file.path, file.bytes);
 }
