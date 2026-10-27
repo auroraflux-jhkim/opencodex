@@ -465,6 +465,13 @@
       ]
     },
     {
+      "path": "data-planes/claude-tool-loading.md",
+      "tier": 3,
+      "title": "Append-only Claude Tool Loading",
+      "scope": "Physical-adapter tool-loading projection, preserved catalogs, fallback exclusions and opt-in prerequisites.",
+      "documents": ["src/claude/", "src/server/responses/"]
+    },
+    {
       "path": "data-planes/chat-reasoning-details.md",
       "tier": 3,
       "title": "Anthropic Thinking Signatures on the Chat Wire",
@@ -942,6 +949,22 @@
       "documents": [
         "desktop/",
         "src/server/management/companion-routes.ts"
+      ]
+    },
+    {
+      "path": "desktop-recovery.md",
+      "tier": 6,
+      "title": "Desktop recovery evidence",
+      "scope": "Native recovery intent, independently anchored executable and accepted-connection proof, cold-start decisions and installation scope.",
+      "documents": [
+        "desktop/src-tauri/src/recovery.rs",
+        "desktop/src-tauri/src/recovery_activity.rs",
+        "desktop/src-tauri/src/recovery_presence.rs",
+        "desktop/src-tauri/src/startup.rs",
+        "desktop/src-tauri/src/supervisor.rs",
+        "src/service/desktop-recovery.ts",
+        "src/service/desktop-recovery-process.ts",
+        "src/cli/ensure-desktop-cold-start.ts"
       ]
     },
     {
