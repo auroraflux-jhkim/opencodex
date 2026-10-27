@@ -1,12 +1,62 @@
 import { expect, test } from "bun:test";
-import { isConnectionRefused, observeProxyLiveness, type LivenessIo } from "../../src/server/proxy-liveness";
+import { isConnectionRefused, loopbackProbeHosts, observeProxyLiveness, type LivenessIo } from "../../src/server/proxy-liveness";
+import { normalizeBindHostname } from "../../src/server/bind-host";
 
 const refused = () => Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
 const base: LivenessIo = {
   readPidFn: () => null, readRuntimeFn: () => null,
   configFn: () => ({ port: 10100, hostname: "127.0.0.1" }),
   attempts: 3, sleepFn: async () => {},
+  loopbackAvailabilityFn: () => "available",
 };
+
+for (const [hostname, bound, families] of [
+  [undefined, "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  ["", "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  ["  ", "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  ["localhost", "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  ["localhost.", "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  ["LOCALHOST", "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  [" LoCaLhOsT. ", "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  ["127.0.0.1", "127.0.0.1", ["127.0.0.1", "[::1]"]],
+  ["::1", "::1", ["[::1]", "127.0.0.1"]],
+  ["[::1]", "[::1]", ["[::1]", "127.0.0.1"]],
+  ["0.0.0.0", "0.0.0.0", ["127.0.0.1", "[::1]"]],
+  ["::", "::", ["127.0.0.1", "[::1]"]],
+  ["[::]", "[::]", ["127.0.0.1", "[::1]"]],
+  ["0.0.0.0.", "0.0.0.0.", ["127.0.0.1", "[::1]"]],
+  ["00.0.0.000", "00.0.0.000", ["127.0.0.1", "[::1]"]],
+  ["0::", "0::", ["127.0.0.1", "[::1]"]],
+  ["::0", "::0", ["127.0.0.1", "[::1]"]],
+  ["0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:0", ["127.0.0.1", "[::1]"]],
+  ["*", "*", ["127.0.0.1", "[::1]"]],
+  ["0", "0", ["127.0.0.1", "[::1]"]],
+  ["192.0.2.1", "192.0.2.1", ["192.0.2.1"]],
+  ["proxy.example", "proxy.example", ["proxy.example"]],
+  ["localhost.example", "localhost.example", ["localhost.example"]],
+  ["2001:db8::1", "2001:db8::1", ["[2001:db8::1]"]],
+] as const) {
+  test(`F5 startup bind and recovery families agree for ${JSON.stringify(hostname)}`, async () => {
+    expect(normalizeBindHostname(hostname)).toBe(bound);
+    expect(loopbackProbeHosts(hostname)).toEqual([...families]);
+    const calls: string[] = [];
+    const observation = await observeProxyLiveness({ ...base, attempts: 1,
+      configFn: () => ({ port: 10100, hostname }), loopbackAvailabilityFn: () => "available",
+      fetchFn: (async (url: string) => { calls.push(new URL(url).hostname); throw refused(); }) as typeof fetch,
+    });
+    expect(observation).toEqual({ kind: "absent", live: null });
+    expect(calls).toEqual([...families]);
+    // Every candidate must be definitive; a timeout in either family vetoes recovery.
+    for (const uncertain of families) {
+      expect(await observeProxyLiveness({ ...base, attempts: 1,
+        configFn: () => ({ port: 10100, hostname }), loopbackAvailabilityFn: () => "available",
+        fetchFn: (async (url: string) => {
+          throw new URL(url).hostname === uncertain ? Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }) : refused();
+        }) as typeof fetch,
+      })).toEqual({ kind: "unknown", live: null });
+    }
+  });
+}
 
 for (const code of ["ETIMEDOUT", "ECONNRESET", "EADDRNOTAVAIL"]) {
   test(`F2 parent refusal cannot hide aggregate child ${code}`, async () => {
@@ -14,7 +64,7 @@ for (const code of ["ETIMEDOUT", "ECONNRESET", "EADDRNOTAVAIL"]) {
     let calls = 0;
     expect(await observeProxyLiveness({ ...base, fetchFn: (async () => { calls++; throw error; }) as typeof fetch }))
       .toEqual({ kind: "unknown", live: null });
-    expect(calls).toBe(3);
+    expect(calls).toBe(6); // Three existing attempts per family.
     expect(isConnectionRefused(error)).toBe(false);
   });
 }
@@ -40,8 +90,9 @@ function ipv6Available(): boolean {
   }
 }
 
+for (const hostname of ["localhost", "localhost."]) {
 for (const ownerHost of ["127.0.0.1", "::1"]) {
-  test.skipIf(!ipv6Available())(`F3 localhost finds real owner on ${ownerHost} behind foreign other family`, async () => {
+  test.skipIf(!ipv6Available())(`${hostname.endsWith(".") ? "F5" : "F3"} ${hostname} finds real owner on ${ownerHost} behind foreign other family`, async () => {
     const owner = Bun.serve({ hostname: ownerHost, port: 0,
       fetch: () => Response.json({ service: "opencodex", pid: process.pid }) });
     let foreign: ReturnType<typeof Bun.serve> | undefined;
@@ -49,8 +100,8 @@ for (const ownerHost of ["127.0.0.1", "::1"]) {
       foreign = Bun.serve({ hostname: ownerHost === "::1" ? "127.0.0.1" : "::1", port: owner.port,
         fetch: () => Response.json({ service: "foreign" }) });
       const observation = await observeProxyLiveness({ ...base, verifyPidFn: pid => pid,
-        readRuntimeFn: () => ({ pid: process.pid, port: owner.port!, hostname: "localhost" }),
-        configFn: () => ({ port: owner.port!, hostname: "localhost" }),
+        readRuntimeFn: () => ({ pid: process.pid, port: owner.port!, hostname }),
+        configFn: () => ({ port: owner.port!, hostname }),
       });
       expect(observation.kind).toBe("live");
       expect(observation.live?.pid).toBe(process.pid);
@@ -61,6 +112,7 @@ for (const ownerHost of ["127.0.0.1", "::1"]) {
       await owner.stop(true);
     }
   });
+}
 }
 
 test("F4 confirmed foreign reused PID permits definitive absence without signalling it", async () => {

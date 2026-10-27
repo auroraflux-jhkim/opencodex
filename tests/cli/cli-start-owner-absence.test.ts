@@ -64,6 +64,7 @@ for (const scenario of ["start", "ensure", "service", "supervised", "sibling", "
         return { ...budget, readPidFn: readAlivePid,
           readRuntimeFn: () => ({ pid, port: 10100, hostname: "127.0.0.1" }), verifyPidFn: candidate => candidate,
           configFn: () => ({ port: 10100, hostname: "127.0.0.1" }), sleepFn: async () => {},
+          loopbackAvailabilityFn: () => "available",
           fetchFn: async () => {
             attempts++;
             if (probes <= 2) throw Object.assign(new Error("untrusted-secret-transport-detail"), { code: "ETIMEDOUT" });
@@ -122,7 +123,7 @@ for (const scenario of ["start", "ensure", "service", "supervised", "sibling", "
     expect(readFileSync(pidPath, "utf8")).toBe(String(process.pid));
     expect(result.events).toEqual(["probe:1:false", "lease", "probe:2:true", "release"]);
     expect(result.probes).toBe(2);
-    expect(result.attempts).toBe(12); // two candidates, three existing attempts, twice
+    expect(result.attempts).toBe(18); // Two endpoints: early single-family + leased two-family, three attempts each.
     expect(result.exitCode).toBe(1);
     expect(result.refusal).toMatch(/ownership.*unverified/i);
     expect(result.refusal).not.toContain("untrusted-secret");

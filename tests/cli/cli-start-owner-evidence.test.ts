@@ -28,8 +28,8 @@ function ipv6Available(): boolean {
   }
 }
 
-for (const scenario of ["F2 mixed-aggregate", "F3 ipv4-owner", "F3 ipv6-owner", "F4 reused-pid"] as const) {
-  test.skipIf(scenario.startsWith("F3") && !ipv6Available())(`journal recovery evidence: ${scenario}`, async () => {
+for (const scenario of ["F2 mixed-aggregate", "F3 ipv4-owner", "F3 ipv6-owner", "F4 reused-pid", "F5 localhost."] as const) {
+  test.skipIf((scenario.startsWith("F3") || scenario.startsWith("F5")) && !ipv6Available())(`journal recovery evidence: ${scenario}`, async () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-owner-evidence-")); roots.push(root);
     const home = join(root, "ocx"), codex = join(root, "codex"); mkdirSync(home); mkdirSync(codex);
     const original = '# original\nmodel_provider = "openai"\n';
@@ -50,7 +50,7 @@ for (const scenario of ["F2 mixed-aggregate", "F3 ipv4-owner", "F3 ipv6-owner", 
       import { recoverStartJournalAfterOwnerRecheck as actual, recoverStartStateUnderOwnershipLease } from ${JSON.stringify(repoPath("src/cli/start-owner-fence.ts"))};
       import { readPidFileValue, removePidIfValueIs, readProcessCommandLine, verifyPidIdentity } from ${JSON.stringify(repoPath("src/config/process-state.ts"))};
       import { markCrossHomeSibling, reconcileStartupJournal } from ${JSON.stringify(repoPath("src/cli/cross-home-owner.ts"))};
-      const scenario = ${JSON.stringify(scenario)}, dual = scenario.startsWith("F3");
+      const scenario = ${JSON.stringify(scenario)}, dotted = scenario.startsWith("F5"), dual = scenario.startsWith("F3") || dotted;
       let foreign, listener, other;
       try {
         const stopped = Bun.spawn([process.execPath, "--version"], { stdout: "ignore", stderr: "ignore" });
@@ -66,9 +66,9 @@ for (const scenario of ["F2 mixed-aggregate", "F3 ipv4-owner", "F3 ipv6-owner", 
         if (dual) other = Bun.serve({ hostname: hostname === "::1" ? "127.0.0.1" : "::1", port,
           fetch: () => Response.json({ service: "foreign" }) });
         else { await listener.stop(true); listener = undefined; }
-        const bindHost = dual ? "localhost" : "127.0.0.1";
+        const bindHost = dotted ? "localhost." : dual ? "localhost" : "127.0.0.1";
         writeFileSync(${JSON.stringify(join(home, "config.json"))}, JSON.stringify({ port, hostname: bindHost, providers: {} }));
-        writeFileSync(${JSON.stringify(pidPath)}, String(pid));
+        if (!dotted) writeFileSync(${JSON.stringify(pidPath)}, String(pid));
         // An orphan listener's runtime PID is independent of the stale PID record.
         writeFileSync(${JSON.stringify(join(home, "runtime-port.json"))}, JSON.stringify({ pid: dual ? process.pid : pid, port, hostname: bindHost }));
         let run = actual;
@@ -91,7 +91,8 @@ for (const scenario of ["F2 mixed-aggregate", "F3 ipv4-owner", "F3 ipv6-owner", 
           decide: () => ({ kind: "proceed" }), stayOut: () => { throw new Error("unexpected stay-out"); },
           recover: () => run(owner) }); }
         catch (error) { refusal = error.message; }
-        console.log(JSON.stringify({ pid, refusal, live: owner.live, events, verified,
+        const ownerStillLive = dual ? await fetch("http://" + (hostname === "::1" ? "[::1]" : hostname) + ":" + port + "/healthz").then(r => r.json()) : undefined;
+        console.log(JSON.stringify({ pid, refusal, live: owner.live, events, verified, ownerStillLive,
           commandLineReadable: typeof commandLine === "string" && commandLine.length > 0,
           foreignAlive: foreign ? foreign.exitCode === null : undefined }));
       } finally {
@@ -113,10 +114,14 @@ for (const scenario of ["F2 mixed-aggregate", "F3 ipv4-owner", "F3 ipv6-owner", 
       expect(existsSync(journalPath)).toBe(false); expect(existsSync(pidPath)).toBe(false);
     } else {
       expect(readFileSync(config, "utf8")).toBe(injected); expect(readFileSync(journalPath, "utf8")).toBe(journal);
-      expect(readFileSync(pidPath, "utf8")).toBe(String(result.pid));
+      if (scenario.startsWith("F5")) expect(existsSync(pidPath)).toBe(false);
+      else expect(readFileSync(pidPath, "utf8")).toBe(String(result.pid));
       if (scenario.startsWith("F2")) {
         expect(result.refusal).toContain("ownership is unverified"); expect(result.refusal).not.toContain("untrusted-secret");
-      } else { expect(result.refusal).toBeUndefined(); expect(result.live?.pid).toBeGreaterThan(0); }
+      } else {
+        expect(result.refusal).toBeUndefined(); expect(result.live?.pid).toBeGreaterThan(0);
+        expect(result.ownerStillLive).toEqual({ service: "opencodex", pid: result.live.pid });
+      }
     }
   }, watchdogMs(60_000));
 }

@@ -7,6 +7,7 @@ const io: LivenessIo = {
   readPidFn: () => null, readRuntimeFn: () => null, verifyPidFn: pid => pid,
   configFn: () => ({ port: 10100, hostname: "127.0.0.1" }), sleepFn: async () => {}, attempts: 3,
   readCommandLineFn: () => "ocx start",
+  loopbackAvailabilityFn: () => "available",
 };
 
 for (const [name, fetchFn, kind, attempts] of [
@@ -25,7 +26,7 @@ for (const [name, fetchFn, kind, attempts] of [
     let calls = 0;
     const fetchProbe = (async () => { calls++; return fetchFn(); }) as unknown as typeof fetch;
     expect(await observeProxyLiveness({ ...io, fetchFn: fetchProbe })).toEqual({ kind, live: null });
-    expect(calls).toBe(attempts);
+    expect(calls).toBe(attempts * 2); // Existing budget independently bounds each loopback family.
     // Legacy callers still collapse every negative into null.
     expect(await findLiveProxy({ ...io, fetchFn: fetchProbe })).toBeNull();
   });
@@ -81,7 +82,7 @@ test("a timeout followed by refusals remains unknown within the existing attempt
   expect(await observeProxyLiveness({ ...io,
     fetchFn: (async () => { throw ++calls === 1 ? timeout() : refused(); }) as typeof fetch,
   })).toEqual({ kind: "unknown", live: null });
-  expect(calls).toBe(3);
+  expect(calls).toBe(6); // Three existing attempts in each family, with uncertainty retained.
 });
 
 test("port zero cannot name an owner, but an ambiguous runtime still blocks recovery", async () => {

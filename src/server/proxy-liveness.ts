@@ -10,7 +10,8 @@
  * Lives outside cli.ts (which dispatches argv at module top level) so tests can import it.
  */
 import { loadConfig } from "../config";
-import { isWildcardHostname } from "../codex/loopback-target";
+import { isLoopbackHostname, isWildcardHostname } from "../codex/loopback-target";
+import { normalizeBindHostname } from "./bind-host";
 import { isOcxCommandLine, readAlivePid, readProcessCommandLine, readRuntimePort, verifyPidIdentity } from "../config/process-state";
 import { loopbackFamilyAvailability } from "../lib/loopback-family";
 import {
@@ -518,14 +519,14 @@ async function discoverLiveProxy(io: LivenessIo, observer?: {
     deadlineAt !== undefined && nowFn() >= deadlineAt;
   const expired = (): null => { observer?.endpoint("unknown"); return null; };
   const probe = async (port: number, opts: { hostname?: string; expectedPid?: number }) => {
-    const hostname = opts.hostname?.trim();
-    if (!observer || (hostname && !/^localhost$/i.test(hostname) && !isWildcardHostname(hostname))) {
+    const hostname = normalizeBindHostname(opts.hostname);
+    if (!observer || (!isLoopbackHostname(hostname) && !isWildcardHostname(hostname))) {
       const identity = await proxyIdentityAtObserved(port, opts, probeIo, observer?.endpoint);
       return identity ? { ...identity, hostname: opts.hostname } : null;
     }
     // Parallel families share the existing per-probe attempts/timeout and absolute
     // deadline. A slow family cannot multiply the serial discovery budget.
-    const hosts = ["127.0.0.1", "[::1]"].filter(host =>
+    const hosts = loopbackProbeHosts(hostname).filter(host =>
       (io.loopbackAvailabilityFn ?? loopbackFamilyAvailability)(host) !== "unavailable");
     const identities = await Promise.all(hosts.map(async hostname => {
       const identity = await proxyIdentityAtObserved(port, { ...opts, hostname }, probeIo, observer.endpoint);
@@ -638,9 +639,11 @@ async function discoverLiveProxy(io: LivenessIo, observer?: {
  * different question than the caller asked.
  */
 export function loopbackProbeHosts(hostname: string | undefined): string[] {
-  const primary = probeHostname(hostname);
-  if (primary === "127.0.0.1" || /^localhost$/i.test(primary)) return ["127.0.0.1", "[::1]"];
-  if (primary === "[::1]") return ["[::1]", "127.0.0.1"];
+  const normalized = normalizeBindHostname(hostname);
+  const primary = probeHostname(normalized);
+  if (isLoopbackHostname(normalized) || isWildcardHostname(normalized)) {
+    return primary === "[::1]" ? ["[::1]", "127.0.0.1"] : ["127.0.0.1", "[::1]"];
+  }
   return [primary];
 }
 
