@@ -128,12 +128,10 @@ test.skipIf(process.platform === "win32")("a desktop claim committed as the clie
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const timeoutMs = watchdogMs(10_000);
   try {
-    // A port nothing listens on, so the start path's liveness probe reads absent.
-    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null, { status: 404 }) });
-    const freePort = probe.port;
-    probe.stop(true);
+    // Port zero is an absent endpoint and lets an erroneous runtime start bind
+    // its own socket. The ownership fence must still prevent all publication.
     writeFileSync(join(ocxHome, "config.json"), JSON.stringify({
-      port: freePort,
+      port: 0,
       hostname: "127.0.0.1",
       codexAutoStart: false,
       syncResumeHistory: false,

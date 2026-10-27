@@ -383,17 +383,15 @@ describe("ocx export with no live proxy (accept criterion 5)", () => {
    * would be discovered and the assertion would pass for the wrong reason.
    */
   test("fails through the runtime-api error naming ocx start, emitting no config", () => {
-    const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
-    const deadPort = probe.port;
-    probe.stop(true);
-
     const home = tempDir();
     // Must pass config validation: a rejected config falls back to the DEFAULT config, whose
     // port 10100 may host the developer's own proxy — the test would then probe a live one.
     writeFileSync(
       join(home, "config.json"),
       JSON.stringify({
-        port: deadPort,
+        // A configured zero is an absent endpoint, never an allocatable port
+        // another process can turn into a proxy between setup and discovery.
+        port: 0,
         defaultProvider: "mock",
         providers: { mock: { adapter: "openai-chat", baseUrl: "http://127.0.0.1/v1", allowPrivateNetwork: true } },
       }),

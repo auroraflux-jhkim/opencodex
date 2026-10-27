@@ -724,68 +724,76 @@ describe("startClaudeIntercept wiring", () => {
   });
 
   test("a busy picker port leaves the applied profile for the next restart to retry", { timeout: 30_000 }, async () => {
-    const port = await freePortPair();
-    const pickerPort = port + 1;
-    // Before the restart: an authority was published and Desktop had the picker profile selected.
-    ensurePickerCa(root);
-    expect(applyDesktopPickerProfile({ configDir: root, platform: "darwin", proxyPort: pickerPort }).ok).toBe(true);
-    writeFileSync(join(root, "config.json"), JSON.stringify({
-      port: 10100,
-      providers: {},
-      defaultProvider: "openai",
-      clientIntegrations: { "claude-desktop": true },
-      claudeCode: { desktopMode: "first-party", intercept: { picker: true } },
-    }));
-    const trust = keychain({ trusted: true });
-    const listener = fakeListener();
-    const store = memoryPickerCaStore().store;
-    const startOpts = () => ({
-      config: config({ claudeCode: { intercept: { port } } }),
-      publicPort: 10100,
-      configDir: root,
-      dispatch: async () => new Response("unused"),
-      loadPickerRoutes: async () => ({ nativeSlugs: [], routedModels: [] }),
-      createPicker: (options: CreatePickerRuntimeOptions) => createPickerRuntime({
-        ...options,
-        platform: "darwin" as NodeJS.Platform,
-        security: trust.run,
-        resolveMode: () => "first-party" as const,
-        startListener: listener.start,
-        refreshIntervalMs: 3_600_000,
-      }),
-      pickerSecurity: trust.run,
-      pickerCaStore: store, pickerPlatform: "darwin" as NodeJS.Platform,
-    });
-    // Occupy the picker port: this restart cannot bind it.
-    const squatter = createServer();
-    await new Promise<void>((resolve, reject) => {
-      squatter.once("error", reject);
-      squatter.listen({ port: pickerPort, host: "127.0.0.1" }, () => resolve());
-    });
-    let first;
+    // Keep the conflict owned across both starts. Successful listeners choose their
+    // own ports through the existing bind seam; no released number is reacquired.
+    const squatter = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("occupied") });
+    const pickerPort = squatter.port;
+    const port = pickerPort - 1;
+    let retry = false;
     try {
-      first = await startClaudeIntercept(startOpts());
-      expect(first?.pickerProxyPort).toBeNull();
-      expect(first).toMatchObject({ pickerReason: "port_in_use", pickerFailurePort: pickerPort });
-      // The main pair still serves, and the applied selection is durable evidence for a retry.
-      expect(await connectStatusLine(port, "api.anthropic.com")).toContain("200");
-      expect(inspectDesktopPickerProfile({ configDir: root, platform: "darwin" }).kind).toBe("applied");
-    } finally {
-      await first?.stop();
-      await new Promise<void>(resolve => squatter.close(() => resolve()));
-    }
-    // Port free on the next restart: the surviving selection restores in place.
-    const second = await startClaudeIntercept(startOpts());
-    try {
-      expect(second?.pickerProxyPort).toBe(pickerPort);
-      for (let i = 0; i < 1600 && inspectDesktopPickerProfile({ configDir: root, platform: "darwin" }).kind !== "applied"; i += 1) {
-        await Bun.sleep(5);
+      // Before the restart: an authority was published and Desktop had the picker profile selected.
+      ensurePickerCa(root);
+      expect(applyDesktopPickerProfile({ configDir: root, platform: "darwin", proxyPort: pickerPort }).ok).toBe(true);
+      const original = inspectDesktopPickerProfile({ configDir: root, platform: "darwin" });
+      if (original.kind !== "applied") throw new Error("fixture picker profile was not applied");
+      writeFileSync(join(root, "config.json"), JSON.stringify({
+        port: 10100,
+        providers: {},
+        defaultProvider: "openai",
+        clientIntegrations: { "claude-desktop": true },
+        claudeCode: { desktopMode: "first-party", intercept: { picker: true } },
+      }));
+      const trust = keychain({ trusted: true });
+      const listener = fakeListener();
+      const store = memoryPickerCaStore().store;
+      const startOpts = () => ({
+        config: config({ claudeCode: { intercept: { port } } }),
+        publicPort: 10100,
+        configDir: root,
+        dispatch: async () => new Response("unused"),
+        loadPickerRoutes: async () => ({ nativeSlugs: [], routedModels: [] }),
+        createPicker: (options: CreatePickerRuntimeOptions) => createPickerRuntime({
+          ...options,
+          platform: "darwin" as NodeJS.Platform,
+          security: trust.run,
+          resolveMode: () => "first-party" as const,
+          startListener: listener.start,
+          refreshIntervalMs: 3_600_000,
+        }),
+        pickerSecurity: trust.run,
+        pickerCaStore: store, pickerPlatform: "darwin" as NodeJS.Platform,
+        startProxy: (requested: number, options: Parameters<typeof startConnectProxy>[1]) =>
+          startConnectProxy(requested === pickerPort && !retry ? pickerPort : 0, options),
+      });
+      let first;
+      try {
+        first = await startClaudeIntercept(startOpts());
+        expect(first?.pickerProxyPort).toBeNull();
+        expect(first).toMatchObject({ pickerReason: "port_in_use", pickerFailurePort: pickerPort });
+        // The main pair still serves, and the applied selection is durable evidence for a retry.
+        expect(await connectStatusLine(first!.proxyPort, "api.anthropic.com")).toContain("200");
+        expect(inspectDesktopPickerProfile({ configDir: root, platform: "darwin" }))
+          .toMatchObject({ kind: "applied", entryId: original.entryId, proxyUrl: original.proxyUrl });
+      } finally {
+        await first?.stop();
       }
-      expect(inspectDesktopPickerProfile({ configDir: root, platform: "darwin" }))
-        .toMatchObject({ kind: "applied", proxyUrl: `http://127.0.0.1:${pickerPort}` });
-    } finally {
-      await second?.stop();
-    }
+      // The next restart gets a fresh listener; the surviving selection restores in place.
+      retry = true;
+      const second = await startClaudeIntercept(startOpts());
+      try {
+        expect(second?.pickerProxyPort).toBeGreaterThan(0);
+        const restoredUrl = `http://127.0.0.1:${second!.pickerProxyPort}`;
+        for (let i = 0; i < 1600; i += 1) {
+          const current = inspectDesktopPickerProfile({ configDir: root, platform: "darwin" });
+          if (current.kind === "applied" && current.proxyUrl === restoredUrl) break;
+          await Bun.sleep(5);
+        }
+        expect(inspectDesktopPickerProfile({ configDir: root, platform: "darwin" }))
+          .toMatchObject({ kind: "applied", entryId: original.entryId, proxyUrl: restoredUrl });
+      } finally {
+        await second?.stop();
+      }
+    } finally { await squatter.stop(true); }
   });
 
   test("only the app's browser tunnels on Desktop's egress proxy consult the picker", async () => {
