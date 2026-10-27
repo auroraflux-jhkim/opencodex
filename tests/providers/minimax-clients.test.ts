@@ -438,13 +438,11 @@ describe("MiniMax CLI wrapper", () => {
   });
 
   test("returns 502 when the selected OpenCodex proxy address is unavailable", async () => {
-    const reservation = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: () => Response.json({ reserved: true }),
-    });
-    const deadPort = reservation.port;
-    await reservation.stop(true);
+    // Own the endpoint throughout: a peer that closes TCP without an HTTP response
+    // is unavailable to the bridge even when another test is binding nearby ports.
+    const reservation = createServer(socket => socket.destroy());
+    await new Promise<void>(resolve => reservation.listen(0, "127.0.0.1", resolve));
+    const deadPort = (reservation.address() as { port: number }).port;
     const bridge = startMmxTextBridge({ hostname: "127.0.0.1", port: deadPort });
     try {
       const response = await fetch(`${bridge.baseUrl}/anthropic/v1/messages`, {
@@ -459,6 +457,7 @@ describe("MiniMax CLI wrapper", () => {
       });
     } finally {
       await bridge.stop();
+      await new Promise<void>(resolve => reservation.close(() => resolve()));
     }
   });
 
