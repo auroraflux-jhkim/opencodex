@@ -1,6 +1,22 @@
 import type { ServiceChildOwnershipDecision } from "../service/service-child-ownership";
+import { removePidIfValueIs } from "../config/process-state";
+import { findLiveProxy, START_OWNERSHIP_LIVENESS, type LiveProxy } from "../server/proxy-liveness";
+import { markCrossHomeSibling, reconcileStartupJournal } from "./cross-home-owner";
 
-/** Fence shared client-state recovery against a claim committed after the early owner probe. */
+/** Called only under the ownership lease; a negative early probe grants no mutation authority. */
+export async function recoverStartJournalAfterOwnerRecheck(
+  owner: { live: LiveProxy | null; pidSnapshot: number | null },
+  sibling = false,
+): Promise<boolean> {
+  owner.live = await findLiveProxy(START_OWNERSHIP_LIVENESS);
+  if (owner.live) return sibling;
+  removePidIfValueIs(owner.pidSnapshot);
+  if (!sibling) sibling = await markCrossHomeSibling();
+  if (!sibling) reconcileStartupJournal();
+  return sibling;
+}
+
+/** Hold ownership stable through the final liveness check and shared-state recovery. */
 export async function recoverStartStateUnderOwnershipLease(deps: {
   supervised: boolean;
   acquireLease: () => { release(): void };
@@ -8,7 +24,6 @@ export async function recoverStartStateUnderOwnershipLease(deps: {
   stayOut: (refusal: string) => never;
   recover: () => Promise<boolean>;
 }): Promise<boolean> {
-  if (!deps.supervised) return deps.recover();
   const lease = deps.acquireLease();
   let released = false;
   const release = () => {
@@ -17,7 +32,7 @@ export async function recoverStartStateUnderOwnershipLease(deps: {
     lease.release();
   };
   try {
-    const decision = deps.decide();
+    const decision = deps.supervised ? deps.decide() : { kind: "proceed" as const };
     if (decision.kind === "stay-out") {
       // stayOut exits the process, so a finally block would never release the lease.
       release();
