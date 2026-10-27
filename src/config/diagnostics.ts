@@ -23,6 +23,7 @@ import { getConfigDir, getConfigPath } from "./paths";
 import { getDefaultConfig } from "./proxy-env";
 import { salvageConfigCandidate } from "./salvage";
 import { sanitizeRemovedOpenCodeFreeForLoad } from "./removed-opencode-free";
+import { preserveRemovedOpenCodeFree } from "./removed-opencode-free-backup";
 import { sanitizeOpenCodeOverridesForLoad } from "./opencode-wire-upgrade";
 import {
   sanitizeReasoningPinsForLoad,
@@ -781,9 +782,13 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
 }
 
 export function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
+  return configDiagnosticsFromText(raw);
+}
+
+function configDiagnosticsFromText(raw: string, file?: { path: string; bytes: Uint8Array }): ConfigDiagnostics {
   try {
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
-    sanitizeRemovedOpenCodeFreeForLoad(parsed);
+    if (sanitizeRemovedOpenCodeFreeForLoad(parsed) && file) preserveRemovedOpenCodeFree(file.path, file.bytes);
     sanitizeOpenCodeOverridesForLoad(parsed);
     sanitizeReasoningPinsForLoad(parsed);
     // Same degradation as loadConfig: a hand-edited invalid retryOn429 must not trip the
@@ -837,8 +842,10 @@ export function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
 
 export function readConfigFileSnapshot(): ConfigFileSnapshot {
   try {
-    const raw = readFileSync(getConfigPath(), "utf-8");
-    return { diagnostics: configDiagnosticsFromRaw(raw), raw };
+    const path = getConfigPath();
+    const bytes = readFileSync(path);
+    const raw = bytes.toString("utf-8");
+    return { diagnostics: configDiagnosticsFromText(raw, { path, bytes }), raw };
   } catch (error) {
     if (isMissingPathError(error)) {
       return {
@@ -890,12 +897,13 @@ export type ConfigAdmissionSnapshot =
   | Readonly<{ kind: "unreadable"; diagnostics: ConfigDiagnostics; contentSha256: null }>;
 
 export function readConfigAdmissionSnapshot(): ConfigAdmissionSnapshot {
+  const path = getConfigPath();
   let bytes: Buffer;
   try {
     // ONE read. Hashing the file and then reading it again to parse would leave
     // a window for the two to disagree, which is the exact hazard this exists
     // to detect — the check would become a second chance to be wrong.
-    bytes = readFileSync(getConfigPath());
+    bytes = readFileSync(path);
   } catch (error) {
     return {
       kind: "unreadable",
@@ -908,7 +916,7 @@ export function readConfigAdmissionSnapshot(): ConfigAdmissionSnapshot {
   return {
     kind: "read",
     // Decoded from the same buffer that was hashed, not re-read from disk.
-    diagnostics: configDiagnosticsFromRaw(bytes.toString("utf-8")),
+    diagnostics: configDiagnosticsFromText(bytes.toString("utf-8"), { path, bytes }),
     contentSha256: createHash("sha256").update(bytes).digest("hex"),
   };
 }

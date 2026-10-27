@@ -1,13 +1,15 @@
 import { expect, spyOn, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { armClaudeCodeBaseline, getConfigPath, getDefaultConfig, loadConfig, mutatePersistedConfig, saveConfigPreservingClaudeCode } from "../../src/config";
-import { readConfigDiagnostics } from "../../src/config/diagnostics";
+import { configDiagnosticsFromRaw, readConfigAdmissionSnapshot, readConfigDiagnostics } from "../../src/config/diagnostics";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
 import { buildClaudeReplayConfig } from "../../src/server/claude-messages";
 import { parseRequest } from "../../src/responses/parser";
 import { planVisionSidecar, shouldResolveOpenAiVisionSidecar } from "../../src/vision/plan";
 import { planWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../src/web-search";
 import { createTempHome } from "../helpers/temp-home";
+import { repoPath } from "../helpers/repo-root";
 
 test("retired OpenCode Free entries warn once on load and an unrelated save persists their removal", () => {
   const home = createTempHome("ocx-removed-provider-");
@@ -41,7 +43,7 @@ test("retired OpenCode Free entries warn once on load and an unrelated save pers
       claudeCode: { enabled: false, subagentModelForce: "opencode-free/big-pickle", model: "opencode-free/big-pickle", tierModels: { opus: "healthy/keep" } },
       modelPickerOrder: ["opencode-free/big-pickle", "healthy/keep"],
     };
-    const bytes = JSON.stringify(raw, null, 2);
+    const bytes = "\uFEFF" + JSON.stringify(raw, null, 2) + "\r\n";
     writeFileSync(getConfigPath(), bytes, "utf8");
     const loaded = loadConfig();
     expect(Object.keys(loaded.providers).sort()).toEqual(["healthy", "openai"]);
@@ -79,7 +81,81 @@ test("retired OpenCode Free entries warn once on load and an unrelated save pers
     expect(persisted.providers.healthy).toEqual(loaded.providers.healthy);
     expect(persisted.subagentModels).toEqual(["healthy/keep"]);
     expect(warnings[0]![0]).toContain("next configuration save removes them from config.json");
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    expect(existsSync(backup)).toBe(true);
+    expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
+    expect(warnings[0]![0]).toContain(`the original file was saved to ${backup}`);
+    expect(warnings[0]![0]).toContain("restore by copying it back over config.json");
+    // A later retired config must retain the first recovery point, even after another save.
+    writeFileSync(getConfigPath(), bytes + "\n");
+    loadConfig();
+    expect(mutatePersistedConfig(config => {
+      config.port = 10101;
+      return { changed: true, value: undefined };
+    }).status).toBe("committed");
+    expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
   } finally { warn.mockRestore(); home.remove(); }
+});
+
+test.each(["diagnostics", "admission"])("%s disk reads preserve original retired bytes before a mutation", reader => {
+  withLegacyConfig({}, bytes => {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    const diagnostics = reader === "diagnostics" ? readConfigDiagnostics() : readConfigAdmissionSnapshot().diagnostics;
+    expect(diagnostics.source).toBe("file");
+    expect(diagnostics.config.providers["opencode-free"]).toBeUndefined();
+    expect(readFileSync(backup)).toEqual(Buffer.from(bytes));
+  });
+});
+
+test.skipIf(process.platform === "win32")("retirement backup is owner-only on POSIX", () => {
+  withLegacyConfig({}, () => {
+    loadConfig();
+    expect(statSync(`${getConfigPath()}.pre-opencode-free-removal.bak`).mode & 0o777).toBe(0o600);
+  });
+});
+
+test("healthy config and imported retired text create no recovery copy", () => {
+  const home = createTempHome("ocx-no-retired-backup-");
+  try {
+    writeFileSync(getConfigPath(), JSON.stringify(getDefaultConfig()));
+    configDiagnosticsFromRaw(JSON.stringify({ ...getDefaultConfig(), providers: { "opencode-free": {} } }));
+    loadConfig();
+    readConfigDiagnostics();
+    expect(mutatePersistedConfig(config => {
+      config.port = 10101;
+      return { changed: true, value: undefined };
+    }).status).toBe("committed");
+    expect(existsSync(`${getConfigPath()}.pre-opencode-free-removal.bak`)).toBe(false);
+  } finally { home.remove(); }
+});
+
+test("an occupied backup name never crashes loading or overwrites the occupant", () => {
+  withLegacyConfig({}, bytes => {
+    const backup = `${getConfigPath()}.pre-opencode-free-removal.bak`;
+    mkdirSync(backup);
+    expect(loadConfig().providers["opencode-free"]).toBeUndefined();
+    expect(readConfigDiagnostics().source).toBe("file");
+    expect(statSync(backup).isDirectory()).toBe(true);
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(bytes);
+  });
+});
+
+test("a failed recovery copy warns without exposing paths or secret bytes", () => {
+  const home = createTempHome("ocx-failed-retirement-backup-");
+  try {
+    const path = getConfigPath();
+    mkdirSync(`${path}.pre-opencode-free-removal.bak`);
+    const module = pathToFileURL(repoPath("src/config/removed-opencode-free-backup.ts")).href;
+    const script = `import { preserveRemovedOpenCodeFree } from ${JSON.stringify(module)};
+      preserveRemovedOpenCodeFree(${JSON.stringify(path)}, Buffer.from("synthetic-secret-must-not-be-logged"));`;
+    const child = Bun.spawnSync([process.execPath, "--eval", script], { env: { ...process.env } });
+    expect(child.exitCode).toBe(0);
+    const output = child.stdout.toString() + child.stderr.toString();
+    expect(output).toContain("copy config.json now if you need the old entry");
+    expect(output).not.toContain("the original file was saved to");
+    expect(output).not.toContain(path);
+    expect(output).not.toContain("synthetic-secret-must-not-be-logged");
+  } finally { home.remove(); }
 });
 
 function withLegacyConfig(patch: Record<string, unknown>, check: (bytes: string) => void): void {

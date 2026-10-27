@@ -163,6 +163,7 @@ import { getDefaultConfig } from "./config/proxy-env";
 import { configSchema } from "./config/schema/config-schema";
 import { sanitizeOpenCodeOverridesForLoad } from "./config/opencode-wire-upgrade";
 import { sanitizeRemovedOpenCodeFreeForLoad } from "./config/removed-opencode-free";
+import { preserveRemovedOpenCodeFree } from "./config/removed-opencode-free-backup";
 import {
   hardenExistingSecret,
   normalizeApiKeyIds,
@@ -221,9 +222,9 @@ function loadConfigUnobserved(): OcxConfig {
     return withRefreshedCostOverlays(getDefaultConfig());
   }
   try {
-    const raw = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(raw);
-    sanitizeRemovedOpenCodeFreeForLoad(parsed);
+    const bytes = readFileSync(configPath);
+    const parsed = JSON.parse(bytes.toString("utf-8").replace(/^\uFEFF/, ""));
+    if (sanitizeRemovedOpenCodeFreeForLoad(parsed)) preserveRemovedOpenCodeFree(configPath, bytes);
     sanitizeOpenCodeOverridesForLoad(parsed);
     sanitizeAliasesForLoad(parsed);
     sanitizeReasoningPinsForLoad(parsed);
