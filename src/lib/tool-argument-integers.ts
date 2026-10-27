@@ -249,6 +249,8 @@ function tokenDenotesInteger(raw: string): boolean {
   const match = /^-?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(raw);
   if (!match) return false;
   const digits = match[1]! + (match[2] ?? "");
+  // A zero significand is exactly zero for any exponent, even one Number() cannot hold.
+  if (/^0*$/.test(digits)) return true;
   const exponent = Number(match[3] ?? "0");
   if (!Number.isFinite(exponent)) return false;
   const point = match[1]!.length + exponent;

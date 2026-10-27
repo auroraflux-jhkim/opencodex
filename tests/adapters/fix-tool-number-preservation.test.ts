@@ -83,6 +83,12 @@ describe("tool argument numeric preservation", () => {
     expect(coerceIntegerToolArguments('{"tiny":1e-400,"near":9007199254740990.5}', integers))
       .toBe('{"tiny":1e-400,"near":9007199254740990.5}');
   });
+  test("a zero significand stays an exact integer for any exponent", () => {
+    const huge = "9".repeat(309);
+    for (const zero of [`0e${huge}`, `-0e${huge}`, `0.0e-${huge}`, `-0.000E+${huge}`]) {
+      expect(coerceIntegerToolArguments(`{"label":${zero}}`, schema)).toBe('{"label":"0"}');
+    }
+  });
   test("placeholder selection avoids colliding strings and stays linear in the input", () => {
     const colliding = '{"count":1.0,"a":"\\u0000ocx-number:0:0","b":"\\u0000ocx-number:1:x"}';
     expect(coerceIntegerToolArguments(colliding, schema))
