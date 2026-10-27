@@ -289,6 +289,9 @@ The store checks the held ancestors and config root against the normalized DOS l
 the same comparison used by `src/codex/windows-installation-files.ts`; 8.3 aliases refuse before
 ledger access, and a missing config root is created only beneath an already canonical held parent.
 
+Ledger hardening and long-path ACL descriptor reads use extended-length command targets.
+Native pins and canonical DOS-path comparisons retain the alias refusal policy.
+
 An ACL-query timeout fails closed without accepting a late result. Its PowerShell child may still
 hold transient handles while termination settles, so lock cleanup may fail and retain a busy mutex;
 the store does not automatically reclaim that leftover lock. Filtered-token behavior is also unverified.
