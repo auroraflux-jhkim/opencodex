@@ -413,7 +413,7 @@ test("a lone custom-home start still syncs Grok and prunes its own Claude roster
     checkForUpdates: false, clientIntegrations: { codex: false, grok: true, "claude-desktop": false },
     claudeCode: { injectAgents: false, systemEnv: false }, providers: {}, defaultProvider: "openai",
   }));
-  const child = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start", "--port", String(port)], {
+  const child = Bun.spawn([process.execPath, "--preload", helperPath("fixture-windows-runtime-preload.ts"), repoPath("src/cli/index.ts"), "start", "--port", String(port)], {
     cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(child);
@@ -424,7 +424,7 @@ test("a lone custom-home start still syncs Grok and prunes its own Claude roster
   expect(readFileSync(grokPath, "utf8")).toContain(`127.0.0.1:${port}`);
   expect(existsSync(claudePath)).toBe(false);
   writeFileSync(claudePath, "---\ngenerated-by: opencodex\n---\nstale roster\n");
-  const ensure = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "ensure"], {
+  const ensure = Bun.spawn([process.execPath, "--preload", helperPath("fixture-windows-runtime-preload.ts"), repoPath("src/cli/index.ts"), "ensure"], {
     cwd: fx.root, env: { ...process.env, NO_PROXY: "127.0.0.1,localhost" }, stdout: "pipe", stderr: "pipe",
   });
   trackChild(ensure);
