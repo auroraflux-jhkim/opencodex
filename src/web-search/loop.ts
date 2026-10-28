@@ -175,6 +175,10 @@ async function* replay(events: AdapterEvent[]): AsyncGenerator<AdapterEvent> {
   for (const e of events) yield e;
 }
 
+/**
+ * Keeps the Responses bridge alive while an internal sidecar await is pending. Rejections retain
+ * their original error, and each timeout is cleared on completion, failure, or generator return.
+ */
 async function* withHeartbeats<T>(promise: Promise<T>): AsyncGenerator<AdapterEvent, T> {
   const tracked = promise.then(value => ({ value }));
   for (;;) {
@@ -907,6 +911,11 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     return { ...scanEventsForWebSearch(events, { advisor: deps.advisor !== undefined }), streamedPassthroughCount, events, anthropicReplay };
   };
 
+  /**
+   * Consults through the shared Advisor step and appends the paired result to the worker history.
+   * The synthetic call stays private, and the loop's abort signal prevents a cancelled result from
+   * being replayed. Anthropic reuses its lossless assistant message instead of appending another.
+   */
   async function* runAdvisorCall(call: WebSearchCall, precedingThinking: OcxThinkingContent[], appendAssistant: boolean): AsyncGenerator<AdapterEvent> {
     const advisor = deps.advisor;
     if (!advisor) throw new LoopError(502, "advisor call arrived without an advisor sidecar");

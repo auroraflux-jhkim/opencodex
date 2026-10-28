@@ -86,7 +86,11 @@ export interface AdvisorSidecarCall {
   providerMetadata?: import("../../types").OcxProviderOpaqueToolCallMetadata;
 }
 
-/** Shared continuation/consultation bounds for the normal guard and fetch sidecar loops. */
+/**
+ * Shares continuation/consultation bounds between the normal guard and fetch sidecar loops.
+ * Each leg is reserved before any expert await, while repeated calls receive one bounded limit
+ * result instead of starting another consultation. The tool result preserves the worker call id.
+ */
 export function createAdvisorSidecarStep(plan: AdvisorPlan) {
   let consultations = 0;
   let continuations = 0;
