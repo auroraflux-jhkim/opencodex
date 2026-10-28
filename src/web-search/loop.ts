@@ -946,7 +946,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     ));
     if (signal.aborted) throw new LoopError(499, "client closed request during advisor consultation");
     messages.push(consulted.message);
-    if (advisor.exhausted() && adapter.name !== "anthropic") {
+    if (advisor.exhausted()) {
       allTools = allTools.filter(tool => !tool.advisor && tool.name !== ADVISOR_TOOL_NAME);
       if ((typeof activeToolChoice === "object" && activeToolChoice !== null
         && "name" in activeToolChoice && activeToolChoice.name === ADVISOR_TOOL_NAME)
