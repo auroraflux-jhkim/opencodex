@@ -65,7 +65,9 @@ multi-call pairing, overlap and lifecycle release.
   exposing the synthetic call to the client. Mixed real client calls still end interception. Search
   and Advisor iterations have independent allowances within one hard loop cap; consultation waits
   emit heartbeats and share the loop's cancellation signal. `advisor-responses-wiring.test.ts`
-  covers search-enabled, mixed-call, real-client-call and repeated-consultation paths.
+  covers search-enabled, mixed-call, real-client-call and repeated-consultation paths. The limit
+  reports accumulated worker usage once, without attaching it again to the terminal error;
+  `tests/advisor/advisor-web-search.test.ts` covers the accounting and independent allowances.
 - Turns claimed by the image/video sidecar loops keep the advisor tool un-injected; preflight still applies.
 
 ## Recursion fence (server-owned authority)

@@ -1215,8 +1215,10 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           if (split.calls.some(call => call.kind === "advisor")) {
             const continuationError = deps.advisor!.beginLeg();
             if (continuationError) {
+              // All legs are already in hiddenUsage; attaching it to the error would
+              // make the bridge's onUsage callback add and report those legs again.
               if (hiddenUsage) deps.onUsage?.(hiddenUsage);
-              yield hiddenUsage ? { ...continuationError, usage: hiddenUsage } : continuationError;
+              yield continuationError;
               return;
             }
           }

@@ -146,6 +146,7 @@ Fetch-based web-search turns support the same manual consultation path. The sear
 `web_search` and `advisor` calls in worker order, so enabling hosted search does not hide the
 advisor tool. Search and Advisor iterations have separate allowances, and a real client tool call
 still returns control to the client. Run-turn and image/video sidecar turns retain the limitations below.
+Usage accounting includes each worker turn once, including the leg rejected by the Advisor continuation limit.
 
 Suppression does not read Advisor strings. Automatic dedup is the server-owned ledger. A
 developer message, including one that copies the transport text, does not suppress preflight.

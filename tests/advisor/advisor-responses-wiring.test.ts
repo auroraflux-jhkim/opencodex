@@ -349,7 +349,7 @@ describe("advisor responses wiring (end-to-end)", () => {
     expect(serialized).toContain("Following the advice");
   });
 
-  test("manual advisor works while the web-search sidecar owns the turn", async () => {
+  test.each([true, false])("manual advisor works while the web-search sidecar owns the turn (stream=%s)", async stream => {
     releaseSpendHome = acquireOwnedSpendHome();
     const workerBodies: string[] = [];
     const chatRequests: string[] = [];
@@ -361,7 +361,7 @@ describe("advisor responses wiring (end-to-end)", () => {
     loopbackInterceptor(config, { chatRequests });
     stubExaSearch();
 
-    const response = await handleResponses(workerRequest("Use a second opinion with search available", undefined, true, [{ type: "web_search" }]), config, logCtx);
+    const response = await handleResponses(workerRequest("Use a second opinion with search available", undefined, stream, [{ type: "web_search" }]), config, logCtx);
     const body = await response.text();
     expect(response.status).toBe(200);
     expect(chatRequests).toHaveLength(1);
